@@ -1,0 +1,119 @@
+cmake_minimum_required(VERSION 3.16)
+project(gamecom_emulator LANGUAGES C CXX)
+
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_C_EXTENSIONS OFF)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+option(GAMECOM_STATIC_LINUX_EXECUTABLES "Statically link Linux executables for fewer runtime-library requirements" ON)
+function(gamecom_use_portable_linux_link target)
+  if(GAMECOM_STATIC_LINUX_EXECUTABLES AND CMAKE_SYSTEM_NAME STREQUAL "Linux"
+     AND CMAKE_C_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    target_link_options(${target} PRIVATE -static)
+  endif()
+endfunction()
+
+add_library(gamecom_core STATIC src/core.c src/disasm.c src/video.c)
+target_include_directories(gamecom_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+if(MSVC)
+  target_compile_options(gamecom_core PRIVATE /W4)
+else()
+  target_compile_options(gamecom_core PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+add_library(gamecom_homebrew_demo STATIC src/homebrew_demo.c)
+target_include_directories(gamecom_homebrew_demo PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+add_executable(gamecom-debug src/monitor.c)
+target_link_libraries(gamecom-debug PRIVATE gamecom_core)
+gamecom_use_portable_linux_link(gamecom-debug)
+
+add_executable(gamecom-demo src/demo_main.c)
+target_link_libraries(gamecom-demo PRIVATE gamecom_core gamecom_homebrew_demo)
+gamecom_use_portable_linux_link(gamecom-demo)
+
+add_library(gamecom_standalone_cpu STATIC src/standalone/sm8521_cpu.cpp)
+target_include_directories(gamecom_standalone_cpu PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/standalone)
+target_link_libraries(gamecom_standalone_cpu PUBLIC gamecom_core)
+if(MSVC)
+  target_compile_options(gamecom_standalone_cpu PRIVATE /W4)
+else()
+  target_compile_options(gamecom_standalone_cpu PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+add_executable(gamecom-standalone-demo src/standalone/demo_main.cpp)
+target_link_libraries(gamecom-standalone-demo PRIVATE gamecom_standalone_cpu gamecom_homebrew_demo)
+gamecom_use_portable_linux_link(gamecom-standalone-demo)
+
+add_executable(gamecom-boot src/standalone/boot_main.cpp)
+target_link_libraries(gamecom-boot PRIVATE gamecom_standalone_cpu)
+gamecom_use_portable_linux_link(gamecom-boot)
+
+add_library(gamecom_audio_synth STATIC src/standalone/audio_synth.cpp)
+target_include_directories(gamecom_audio_synth PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/standalone)
+if(MSVC)
+  target_compile_options(gamecom_audio_synth PRIVATE /W4)
+else()
+  target_compile_options(gamecom_audio_synth PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+add_executable(gamecom-test tests/test_core.c)
+target_link_libraries(gamecom-test PRIVATE gamecom_core gamecom_homebrew_demo)
+gamecom_use_portable_linux_link(gamecom-test)
+
+add_executable(gamecom-test-standalone tests/test_standalone_cpu.cpp)
+target_link_libraries(gamecom-test-standalone PRIVATE gamecom_standalone_cpu gamecom_homebrew_demo)
+gamecom_use_portable_linux_link(gamecom-test-standalone)
+
+add_executable(gamecom-test-video tests/test_video.c)
+target_link_libraries(gamecom-test-video PRIVATE gamecom_core)
+gamecom_use_portable_linux_link(gamecom-test-video)
+
+add_executable(gamecom-test-audio tests/test_audio.cpp)
+target_link_libraries(gamecom-test-audio PRIVATE gamecom_audio_synth gamecom_core)
+gamecom_use_portable_linux_link(gamecom-test-audio)
+
+enable_testing()
+add_test(NAME core-smoke COMMAND gamecom-test)
+add_test(NAME standalone-sm85-demo COMMAND gamecom-test-standalone)
+add_test(NAME lcd-video-frame COMMAND gamecom-test-video)
+add_test(NAME sm8521-audio-synthesis COMMAND gamecom-test-audio)
+
+option(GAMECOM_ENABLE_SDL2 "Build the optional SDL2 video/input viewer" ON)
+if(GAMECOM_ENABLE_SDL2)
+  find_package(SDL2 QUIET)
+  if(SDL2_FOUND)
+    add_executable(gamecom-sdl
+      src/sdl_main.cpp src/sdl_frontend.cpp src/standalone/audio_output.cpp)
+    target_include_directories(gamecom-sdl PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/third_party/miniaudio)
+    target_link_libraries(gamecom-sdl PRIVATE
+      gamecom_core gamecom_homebrew_demo gamecom_standalone_cpu gamecom_audio_synth)
+    if(CMAKE_DL_LIBS)
+      target_link_libraries(gamecom-sdl PRIVATE ${CMAKE_DL_LIBS})
+    endif()
+    if(UNIX)
+      find_package(Threads REQUIRED)
+      target_link_libraries(gamecom-sdl PRIVATE Threads::Threads m)
+    endif()
+    if(TARGET SDL2::SDL2)
+      target_link_libraries(gamecom-sdl PRIVATE SDL2::SDL2)
+    else()
+      target_include_directories(gamecom-sdl PRIVATE ${SDL2_INCLUDE_DIRS})
+      target_link_libraries(gamecom-sdl PRIVATE ${SDL2_LIBRARIES})
+    endif()
+    if(TARGET SDL2::SDL2main)
+      target_link_libraries(gamecom-sdl PRIVATE SDL2::SDL2main)
+    endif()
+  else()
+    message(STATUS "SDL2 not found: building portable core/debugger/tests only")
+  endif()
+endif()
