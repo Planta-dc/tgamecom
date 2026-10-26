@@ -23,7 +23,8 @@ make test
 ./gamecom-debug
 ./gamecom-boot firmware - 20000000 boot-frame.ppm
 make sdl                         # optional; needs SDL2 development files
-./gamecom-sdl --firmware firmware # interactive BIOS/LCD window
+./gamecom-sdl                    # interactive launcher: choose firmware and optional game ROM
+./gamecom-sdl --firmware firmware # boot BIOS directly (optional --rom PATH)
 # or: ./gamecom-sdl --demo       # standalone VRAM/LCD test
 ```
 
@@ -52,7 +53,7 @@ Do not pass the BIOS ZIP as a cartridge; the loader rejects ZIP/unsupported size
 
 ### Manual GitHub Actions build
 
-The repository includes `.github/workflows/manual-build.yml`, triggered only by `workflow_dispatch`. After pushing the repo, open **Actions → Manual Linux build → Run workflow**. It builds on Ubuntu 22.04, compiles the CLI and GUI/audio frontend, runs all tests, then creates a portable `gamecom-linux-x86_64.AppImage` that bundles SDL2 and non-core runtime libraries. Download the workflow artifact, make the AppImage executable (`chmod +x gamecom-linux-x86_64.AppImage`), and run it. AppImage does not bundle glibc: the host must provide glibc 2.35 or newer. Some Linux systems also need FUSE for AppImages; when FUSE is unavailable, try `APPIMAGE_EXTRACT_AND_RUN=1 ./gamecom-linux-x86_64.AppImage`. The raw `gamecom-sdl` binary is also included and still requires SDL2 installed on the host. No BIOS or retail-game ROMs are included in the artifact.
+The repository includes `.github/workflows/manual-build.yml`, triggered only by `workflow_dispatch`. After pushing the repo, open **Actions → Manual Linux build → Run workflow**. It builds on Ubuntu 22.04, compiles the CLI and GUI/audio frontend, runs all tests, then creates a portable `gamecom-linux-x86_64.AppImage` that bundles SDL2 and non-core runtime libraries. Download the workflow artifact, make the AppImage executable (`chmod +x gamecom-linux-x86_64.AppImage`), and run it. With no arguments, the app opens an in-app launcher where you can browse to a firmware folder and optionally select a raw `.bin` cartridge; the firmware folder must contain `internal.bin` and `external.bin`. AppImage does not bundle glibc: the host must provide glibc 2.35 or newer. Some Linux systems also need FUSE for AppImages; when FUSE is unavailable, try `APPIMAGE_EXTRACT_AND_RUN=1 ./gamecom-linux-x86_64.AppImage`. The raw `gamecom-sdl` binary is also included and still requires SDL2 installed on the host. No BIOS or retail-game ROMs are included in the artifact.
 
 CMake build and tests:
 
@@ -64,7 +65,7 @@ ctest --test-dir build --output-on-failure
 ./build/gamecom-boot firmware - 20000000 boot-frame.ppm
 ```
 
-`gamecom-sdl` is optional and requires SDL2 development files at build time. SDL handles the window, display, and input; bundled miniaudio provides audio output without a separate audio SDK. It uses the independent C++ SM8521 core; run `./gamecom-sdl --firmware firmware` for the BIOS or `./gamecom-sdl --firmware firmware --rom /path/to/raw-cartridge.bin` for a cartridge. `./gamecom-sdl --demo` launches a homebrew LCD test. Inputs: arrows, A/B/C/D, M/P/S, N=reset/power; mouse presses map to the nearest cell in the MAME-reference 13×10 touch matrix; Escape exits. The screen-to-matrix mapping is a practical approximation, not confirmed physical coordinates. If no host audio device is available, the frontend reports that and continues silently. Sound currently models SG0/SG1 wave RAM and the direct DAC using frame-boundary register snapshots; sub-frame timing, SG2, and real-game audio have not been validated. LCD scanline fetch races also remain.
+`gamecom-sdl` is optional and requires SDL2 development files at build time. SDL handles the launcher, window, display, and input; bundled miniaudio provides audio output without a separate audio SDK. Running `./gamecom-sdl` with no arguments opens the launcher to browse for firmware and an optional raw cartridge; direct boot is also available with `./gamecom-sdl --firmware firmware` or `./gamecom-sdl --firmware firmware --rom /path/to/raw-cartridge.bin`. `./gamecom-sdl --demo` launches a homebrew LCD test. Inputs in the emulated screen: arrows, A/B/C/D, M/P/S, N=reset/power; mouse presses map to the nearest cell in the MAME-reference 13×10 touch matrix; Escape exits. The screen-to-matrix mapping is a practical approximation, not confirmed physical coordinates. If no host audio device is available, the frontend reports that and continues silently. Sound currently models SG0/SG1 wave RAM and the direct DAC using frame-boundary register snapshots; sub-frame timing, SG2, and real-game audio have not been validated. LCD scanline fetch races also remain.
 
 `gamecom-standalone-demo` runs a homebrew diagnostic that writes VRAM; it is not a commercial game. The Centipede boot probe now reaches the game's active playfield: scripted inputs change the shooter position and A produces a visible shot. Long play sessions, collisions/scoring, timing fidelity, and real-time SDL gameplay remain to be validated.
 

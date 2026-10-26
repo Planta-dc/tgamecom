@@ -92,7 +92,8 @@ if(GAMECOM_ENABLE_SDL2)
   find_package(SDL2 QUIET)
   if(SDL2_FOUND)
     add_executable(gamecom-sdl
-      src/sdl_main.cpp src/sdl_frontend.cpp src/standalone/audio_output.cpp)
+      src/sdl_main.cpp src/sdl_launcher.cpp src/sdl_frontend.cpp
+      src/standalone/audio_output.cpp)
     target_include_directories(gamecom-sdl PRIVATE
       ${CMAKE_CURRENT_SOURCE_DIR}/third_party/miniaudio)
     target_link_libraries(gamecom-sdl PRIVATE

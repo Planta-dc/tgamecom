@@ -1,6 +1,7 @@
 #include "gamecom.h"
 #include "gamecom_demo.h"
 #include "gamecom_sdl.hpp"
+#include "gamecom_launcher.hpp"
 
 #include <cstdio>
 #include <cstdlib>
@@ -8,6 +9,7 @@
 #include <iostream>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 static std::string join_path(const std::string& directory, const char *name)
@@ -20,9 +22,10 @@ static std::string join_path(const std::string& directory, const char *name)
 
 static void print_usage(const char *program)
 {
-    std::cout << "Usage: " << program << " [--firmware DIR] [--rom RAW-CARTRIDGE.bin] [--demo]\n"
-                 "Controls: arrows, A/B/C/D, M=menu, P=pause, S=sound, N=reset, mouse=touch, Esc=quit\n"
-                 "Firmware DIR must contain internal.bin and external.bin. SDL2 is required.\n";
+    std::cout << "Usage: " << program << " [--launcher] [--firmware DIR] [--rom RAW-CARTRIDGE.bin] [--demo]\n"
+                 "With no options, opens the interactive launcher.\n"
+                 "Firmware DIR must contain internal.bin and external.bin.\n"
+                 "Controls: arrows, A/B/C/D, M=menu, P=pause, S=sound, N=reset, mouse=touch, Esc=quit\n";
 }
 
 int main(int argc, char **argv)
@@ -30,10 +33,12 @@ int main(int argc, char **argv)
     std::string firmware_dir;
     std::string cartridge_path;
     bool demo = false;
+    bool open_launcher = argc == 1;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--firmware") == 0 && i + 1 < argc) firmware_dir = argv[++i];
         else if (std::strcmp(argv[i], "--rom") == 0 && i + 1 < argc) cartridge_path = argv[++i];
         else if (std::strcmp(argv[i], "--demo") == 0) demo = true;
+        else if (std::strcmp(argv[i], "--launcher") == 0) open_launcher = true;
         else if (std::strcmp(argv[i], "--help") == 0 || std::strcmp(argv[i], "-h") == 0) {
             print_usage(argv[0]);
             return 0;
@@ -42,8 +47,15 @@ int main(int argc, char **argv)
             return 2;
         }
     }
+    if (open_launcher) {
+        GcLaunchSelection selection;
+        if (!gc_sdl_launcher_run(selection)) return 0;
+        firmware_dir = std::move(selection.firmware_dir);
+        cartridge_path = std::move(selection.cartridge_path);
+        demo = false;
+    }
     if (firmware_dir.empty() && !demo) {
-        std::cerr << "Choose --firmware DIR to boot the BIOS or --demo to run the VRAM test.\n";
+        std::cerr << "Choose --firmware DIR to boot the BIOS or open the launcher.\n";
         print_usage(argv[0]);
         return 2;
     }
