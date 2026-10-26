@@ -9,8 +9,9 @@ permissions:
 jobs:
   build:
     name: Build, test, and package
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Build on the 22.04/glibc 2.35 baseline so artifacts run on older Linux distros.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -22,10 +23,32 @@ jobs:
             build-essential pkg-config libsdl2-dev
 
       - name: Compile command-line emulator and run tests
-        run: make -j2 PORTABLE_LDFLAGS= all test
+        run: make -j2 all test
 
       - name: Compile SDL2 window and audio frontend
         run: make -j2 sdl
+
+      - name: Download linuxdeploy AppImage packager
+        run: |
+          curl --fail --location --silent --show-error --retry 3 \
+            https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage \
+            --output /tmp/linuxdeploy-x86_64.AppImage
+          chmod +x /tmp/linuxdeploy-x86_64.AppImage
+
+      - name: Bundle SDL2 runtime into a portable AppImage
+        env:
+          LINUXDEPLOY_OUTPUT_VERSION: ${{ github.sha }}
+        run: |
+          APPIMAGE_EXTRACT_AND_RUN=1 ARCH=x86_64 \
+            /tmp/linuxdeploy-x86_64.AppImage \
+              --appdir AppDir \
+              --executable ./gamecom-sdl \
+              --desktop-file packaging/gamecom.desktop \
+              --icon-file packaging/gamecom.png \
+              --output appimage
+          appimage=$(find . -maxdepth 1 -type f -name '*.AppImage' -print -quit)
+          test -n "$appimage"
+          mv "$appimage" gamecom-linux-x86_64.AppImage
 
       - name: Upload Linux executables
         uses: actions/upload-artifact@v4
@@ -33,6 +56,7 @@ jobs:
           name: gamecom-linux-${{ github.sha }}
           if-no-files-found: error
           path: |
+            gamecom-linux-x86_64.AppImage
             gamecom-boot
             gamecom-debug
             gamecom-demo
