@@ -1,0 +1,40 @@
+name: Manual Linux build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build, test, and package
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            build-essential pkg-config libsdl2-dev
+
+      - name: Compile command-line emulator and run tests
+        run: make -j2 PORTABLE_LDFLAGS= all test
+
+      - name: Compile SDL2 window and audio frontend
+        run: make -j2 sdl
+
+      - name: Upload Linux executables
+        uses: actions/upload-artifact@v4
+        with:
+          name: gamecom-linux-${{ github.sha }}
+          if-no-files-found: error
+          path: |
+            gamecom-boot
+            gamecom-debug
+            gamecom-demo
+            gamecom-standalone-demo
+            gamecom-sdl
