@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Game.com Emulator
+Comment=Standalone Tiger Game.com emulator
+Exec=gamecom-sdl
+Icon=gamecom
+Categories=Game;Emulator;
+Terminal=false

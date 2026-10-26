@@ -21,6 +21,7 @@ AUDIO_SYNTH_OBJ = src/standalone/audio_synth.o
 
 ifeq ($(HOST_OS),Linux)
 MINIAUDIO_LDLIBS = -ldl -lpthread -lm
+SDL_PORTABLE_LDFLAGS ?= -static-libstdc++ -static-libgcc
 else ifeq ($(HOST_OS),Darwin)
 MINIAUDIO_LDLIBS = -lpthread -lm -framework CoreAudio -framework AudioToolbox -framework CoreFoundation
 endif
@@ -84,7 +85,7 @@ ifeq ($(SDL_AVAILABLE),1)
 SDL_OBJECTS = src/sdl_main.o src/sdl_frontend.o src/audio_output.o $(AUDIO_SYNTH_OBJ)
 src/sdl_main.o src/sdl_frontend.o: CPPFLAGS += $(shell pkg-config --cflags sdl2)
 gamecom-sdl: $(CORE_OBJ) $(DEMO_OBJ) $(STANDALONE_CPU_OBJ) $(SDL_OBJECTS)
-	$(CXX) $(CXXFLAGS) $(CXX_WARNINGS) -o $@ $^ $(shell pkg-config --libs sdl2) $(MINIAUDIO_LDLIBS)
+	$(CXX) $(CXXFLAGS) $(CXX_WARNINGS) $(SDL_PORTABLE_LDFLAGS) -o $@ $^ $(shell pkg-config --libs sdl2) $(MINIAUDIO_LDLIBS)
 endif
 
 sdl:

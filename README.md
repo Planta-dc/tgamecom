@@ -27,7 +27,7 @@ make sdl                         # optional; needs SDL2 development files
 # or: ./gamecom-sdl --demo       # standalone VRAM/LCD test
 ```
 
-Linux executables are fully statically linked by default with GNU Make/GCC; `ldd` reports them as not dynamically linked. This avoids the `GLIBCXX_3.4.32` runtime dependency and also avoids shared glibc version requirements. Static libc/C++ development archives are needed to build them. If those archives are unavailable, build dynamically with `make PORTABLE_LDFLAGS=`; CMake has the equivalent `-DGAMECOM_STATIC_LINUX_EXECUTABLES=OFF` option. `gamecom-test-standalone` is a test binary, not required to run the emulator.
+The Linux command-line executables are fully statically linked by default with GNU Make/GCC; `ldd` reports them as not dynamically linked. This avoids shared glibc and `GLIBCXX` runtime requirements for those CLI tools. The SDL frontend statically links libstdc++/libgcc but still uses the host glibc and SDL2 when run directly. The manual GitHub workflow also packages it as an AppImage, bundling SDL2 and other non-core runtime libraries; glibc cannot safely be bundled, so the AppImage needs a host with glibc 2.35 or newer. Static libc/C++ development archives are needed to build the CLI tools. If those archives are unavailable, build dynamically with `make PORTABLE_LDFLAGS=`; CMake has the equivalent `-DGAMECOM_STATIC_LINUX_EXECUTABLES=OFF` option. `gamecom-test-standalone` is a test binary, not required to run the emulator.
 
 `gamecom-boot` takes a firmware directory, an optional raw cartridge `.bin` path (use `-` for none), an emulation-step budget (default 20,000,000), and an optional PPM path. Scripted inputs use `--touch step column row duration` and repeatable `--button step name duration` events; button names are `up`, `down`, `left`, `right`, `menu`, `pause`, `sound`, `a`, `b`, `c`, `d`, and `power`. The touch grid is approximate and event times are CPU steps. A menu/title probe is:
 
@@ -52,7 +52,7 @@ Do not pass the BIOS ZIP as a cartridge; the loader rejects ZIP/unsupported size
 
 ### Manual GitHub Actions build
 
-The repository includes `.github/workflows/manual-build.yml`, triggered only by `workflow_dispatch`. After pushing the repo, open **Actions → Manual Linux build → Run workflow**. It installs SDL2 build files, compiles the CLI and GUI/audio frontend, runs all tests, and uploads the Linux executables as a workflow artifact. The SDL frontend uses the system SDL2 runtime, so a downloaded GUI binary needs that runtime installed (the `libsdl2-dev` build package also installs it). The artifact contains no BIOS or retail-game ROMs.
+The repository includes `.github/workflows/manual-build.yml`, triggered only by `workflow_dispatch`. After pushing the repo, open **Actions → Manual Linux build → Run workflow**. It builds on Ubuntu 22.04, compiles the CLI and GUI/audio frontend, runs all tests, then creates a portable `gamecom-linux-x86_64.AppImage` that bundles SDL2 and non-core runtime libraries. Download the workflow artifact, make the AppImage executable (`chmod +x gamecom-linux-x86_64.AppImage`), and run it. AppImage does not bundle glibc: the host must provide glibc 2.35 or newer. Some Linux systems also need FUSE for AppImages; when FUSE is unavailable, try `APPIMAGE_EXTRACT_AND_RUN=1 ./gamecom-linux-x86_64.AppImage`. The raw `gamecom-sdl` binary is also included and still requires SDL2 installed on the host. No BIOS or retail-game ROMs are included in the artifact.
 
 CMake build and tests:
 
