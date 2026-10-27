@@ -45,6 +45,7 @@ typedef struct {
     bool cart_active;
     uint8_t input_buttons[3]; /* Active-low MAME IN0/IN1/IN2 button groups. */
     bool touch_active;
+    bool touch_strobed;   /* Set when CPU selects/reads the active touch column. */
     uint8_t touch_column; /* 0..12, per MAME's 13-column touch matrix. */
     uint8_t touch_row;    /* 0..9, active touch row within the selected column. */
     bool watch_enabled;

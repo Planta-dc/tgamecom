@@ -36,34 +36,36 @@ static void update_mmu_mapping(GcMachine *m, unsigned window, uint8_t bank)
     }
 }
 
-static void update_pio_input_matrix(GcMachine *m)
+static const uint16_t k_touch_mux[13] = {
+    0xFFFB, 0xFFF7, 0xFFEF, 0xFFDF, 0xFFBF, 0xFF7F,
+    0xFEFF, 0xFDFF, 0xFBFF, 0xF7FF, 0xEFFF, 0xDFFF, 0xBFFF
+};
+
+static void update_pio_input_matrix(GcMachine *m, bool cpu_strobe)
 {
-    static const uint16_t touch_mux[13] = {
-        0xFFFB, 0xFFF7, 0xFFEF, 0xFFDF, 0xFFBF, 0xFF7F,
-        0xFEFF, 0xFDFF, 0xFBFF, 0xF7FF, 0xEFFF, 0xDFFF, 0xBFFF
-    };
     const uint16_t mux = (uint16_t)(m->bus.pio_output_latch[1] |
                                     ((uint16_t)m->bus.pio_output_latch[2] << 8));
     if (mux == 0x7FFFu) { /* Buttons: arrows/menu/pause/sound/A, then B/C. */
         m->bus.reg_file[0x14] = m->bus.input_buttons[0];
-        m->bus.reg_file[0x15] = (uint8_t)((m->bus.reg_file[0x15] & 0xFCu) |
+        m->bus.reg_file[0x15] = (uint8_t)((m->bus.pio_output_latch[1] & 0xFCu) |
                                           (m->bus.input_buttons[1] & 0x03u));
         return;
     }
     if (mux == 0xFFFFu) { /* Power/reset and button D. */
-        m->bus.reg_file[0x14] = (uint8_t)((m->bus.reg_file[0x14] & 0xFCu) |
-                                          (m->bus.input_buttons[2] & 0x03u));
+        m->bus.reg_file[0x14] = (uint8_t)(0xFCu | (m->bus.input_buttons[2] & 0x03u));
         m->bus.reg_file[0x15] = 0xFF;
         return;
     }
     for (unsigned column = 0; column < 13u; ++column) {
-        if (mux != touch_mux[column]) continue;
+        if (mux != k_touch_mux[column]) continue;
         uint16_t touched_rows = 0;
-        if (m->bus.touch_active && m->bus.touch_column == column && m->bus.touch_row < 10u)
+        if (m->bus.touch_active && m->bus.touch_column == column && m->bus.touch_row < 10u) {
             touched_rows = (uint16_t)(1u << m->bus.touch_row);
+            if (cpu_strobe) m->bus.touch_strobed = true;
+        }
         const uint16_t stylus_y = (uint16_t)(touched_rows ^ 0x03FFu);
         m->bus.reg_file[0x14] = (uint8_t)stylus_y;
-        m->bus.reg_file[0x15] = (uint8_t)((m->bus.reg_file[0x15] & 0xFCu) |
+        m->bus.reg_file[0x15] = (uint8_t)((m->bus.pio_output_latch[1] & 0xFCu) |
                                           ((stylus_y >> 8) & 0x03u));
         return;
     }
@@ -90,18 +92,19 @@ void gc_input_set_button(GcMachine *machine, GcButton button, bool down)
     }
     if (down) machine->bus.input_buttons[group] &= (uint8_t)~mask;
     else machine->bus.input_buttons[group] |= mask;
-    update_pio_input_matrix(machine);
+    update_pio_input_matrix(machine, false);
 }
 
 bool gc_input_set_touch(GcMachine *machine, bool down, unsigned column, unsigned row)
 {
     if (down && (column >= 13u || row >= 10u)) return false;
     machine->bus.touch_active = down;
+    machine->bus.touch_strobed = false;
     if (down) {
         machine->bus.touch_column = (uint8_t)column;
         machine->bus.touch_row = (uint8_t)row;
     }
-    update_pio_input_matrix(machine);
+    update_pio_input_matrix(machine, false);
     return true;
 }
 
@@ -109,6 +112,13 @@ static uint8_t raw_map_read(GcMachine *m, uint16_t address, bool debugger_view)
 {
     if (m->bus.patch_valid[address]) return m->bus.patch[address];
     if (address < 0x400u) {
+        if (!debugger_view && (address == 0x14u || address == 0x15u) &&
+            m->bus.touch_active && m->bus.touch_column < 13u) {
+            const uint16_t mux = (uint16_t)(m->bus.pio_output_latch[1] |
+                                            ((uint16_t)m->bus.pio_output_latch[2] << 8));
+            if (mux == k_touch_mux[m->bus.touch_column])
+                m->bus.touch_strobed = true;
+        }
         uint8_t *p = reg_ptr(m, address);
         return p ? *p : 0;
     }
@@ -153,6 +163,7 @@ void gc_machine_reset(GcMachine *machine)
     machine->bus.pio_output_latch[3] = 0x00;
     memset(machine->bus.input_buttons, 0xFF, sizeof(machine->bus.input_buttons));
     machine->bus.touch_active = false;
+    machine->bus.touch_strobed = false;
     machine->bus.touch_column = 0;
     machine->bus.touch_row = 0;
     machine->bus.reg_file[0x30] = 0xB0; /* LCDC reset defaults from MAME reference. */
@@ -195,8 +206,10 @@ void gc_bus_write(GcMachine *machine, uint16_t address, uint8_t value)
             update_mmu_mapping(machine, address - RF_MMU0, value);
         } else if (address >= 0x14u && address <= 0x17u) {
             machine->bus.pio_output_latch[address - 0x14u] = value;
-            if (address == 0x15u || address == 0x16u)
-                update_pio_input_matrix(machine);
+            if (address == 0x14u)
+                update_pio_input_matrix(machine, false);
+            else if (address == 0x15u || address == 0x16u)
+                update_pio_input_matrix(machine, true);
             else if (address == 0x17u)
                 machine->bus.cart_active = machine->bus.cart_present &&
                     (((value & 0xC0u) == 0x40u) || ((value & 0xC0u) == 0x80u));
