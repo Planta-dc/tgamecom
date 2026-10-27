@@ -4,6 +4,7 @@
 #include "sdl_ui.hpp"
 #include "standalone/audio_output.hpp"
 #include "standalone/audio_synth.hpp"
+#include "standalone/serial_link.hpp"
 
 #include <SDL.h>
 #include <algorithm>
@@ -22,7 +23,7 @@ namespace fs = std::filesystem;
 using namespace gc_ui_palette;
 
 constexpr std::array<double, 8> lcd_hz_presets = {
-    30.0, 50.0, 55.2, 59.732155, 60.0, 75.0, 90.0, 120.0
+    30.0, 50.0, 59.732155, 60.0, 75.0, GC_LCD_NATIVE_HZ, 90.0, 120.0
 };
 constexpr std::array<unsigned, 6> cpu_speed_presets = {
     75u, 100u, 120u, 150u, 200u, 300u
@@ -171,7 +172,8 @@ void update_window_title(SDL_Window *window, const GcLaunchSelection& sel,
         return;
     }
     char title[180];
-    const double mhz = (5.5296 * static_cast<double>(sel.timing.cpu_speed_percent)) / 100.0;
+    const double mhz = ((static_cast<double>(GC_CPU_HZ) / 1000000.0) *
+                        static_cast<double>(sel.timing.cpu_speed_percent)) / 100.0;
     const char *state_tag = fast_forward ? " [4x TURBO]" : (paused ? " [PAUSED]" : "");
     if (host_fps > 0.5 && !paused) {
         std::snprintf(title, sizeof(title),
@@ -183,6 +185,27 @@ void update_window_title(SDL_Window *window, const GcLaunchSelection& sel,
                       state_tag, sel.timing.lcd_hz, sel.timing.cpu_speed_percent, mhz);
     }
     SDL_SetWindowTitle(window, title);
+}
+
+std::string effective_nvram_path(const GcLaunchSelection& sel)
+{
+    return sel.nvram_path.empty() ? gc_default_nvram_path() : sel.nvram_path;
+}
+
+bool save_machine_nvram(const GcMachine& machine, const GcLaunchSelection& sel,
+                        std::string *out_error = nullptr)
+{
+    const std::string path = effective_nvram_path(sel);
+    if (path.empty()) return false;
+    std::error_code ec;
+    const fs::path parent = fs::path(path).parent_path();
+    if (!parent.empty()) fs::create_directories(parent, ec);
+    char error[160] = {};
+    if (!gc_nvram_save(&machine, path.c_str(), error, sizeof(error))) {
+        if (out_error) *out_error = error;
+        return false;
+    }
+    return true;
 }
 
 bool load_machine_media(GcMachine& machine, const GcLaunchSelection& sel,
@@ -207,18 +230,40 @@ bool load_machine_media(GcMachine& machine, const GcLaunchSelection& sel,
             out_error = "SELECT A FIRMWARE FOLDER FIRST.";
             return false;
         }
-        const std::string internal_path = join_path(sel.firmware_dir, "internal.bin");
-        const std::string external_path = join_path(sel.firmware_dir, "external.bin");
-        if (!gc_load_firmware(&machine, internal_path.c_str(), external_path.c_str(),
-                              error, sizeof(error))) {
+        std::error_code ec;
+        const std::string internal_cand = join_path(sel.firmware_dir, "internal.bin");
+        const bool has_internal = fs::is_regular_file(internal_cand, ec) && !ec;
+        ec.clear();
+        std::string external_path = join_path(sel.firmware_dir, "external.bin");
+        if (!fs::is_regular_file(external_path, ec) || ec) {
+            ec.clear();
+            const std::string alias = join_path(sel.firmware_dir, "boot.rom");
+            if (fs::is_regular_file(alias, ec) && !ec) external_path = alias;
+        }
+        if (!gc_load_firmware(&machine,
+                              has_internal ? internal_cand.c_str() : nullptr,
+                              external_path.c_str(), error, sizeof(error))) {
             out_error = std::string("FIRMWARE ERROR: ") + error;
             return false;
         }
         if (!sel.cartridge_path.empty() &&
-            !gc_load_cartridge(&machine, sel.cartridge_path.c_str(), error, sizeof(error))) {
-            out_error = std::string("CARTRIDGE ERROR: ") + error;
+            !gc_load_cartridge_slot(&machine, 1u, sel.cartridge_path.c_str(),
+                                    error, sizeof(error))) {
+            out_error = std::string("SLOT 1 ROM ERROR: ") + error;
             return false;
         }
+        if (!sel.cartridge2_path.empty() &&
+            !gc_load_cartridge_slot(&machine, 2u, sel.cartridge2_path.c_str(),
+                                    error, sizeof(error))) {
+            out_error = std::string("SLOT 2 ROM ERROR: ") + error;
+            return false;
+        }
+        const std::string nvram = effective_nvram_path(sel);
+        ec.clear();
+        if (!nvram.empty() && fs::is_regular_file(nvram, ec) && !ec) {
+            (void)gc_nvram_load(&machine, nvram.c_str(), error, sizeof(error));
+        }
+        if (sel.warm_boot_nvram) gc_nvram_seed_warm_boot(&machine);
     }
     gc_machine_reset(&machine);
     return true;
@@ -300,11 +345,50 @@ int gc_sdl_session_run(GcMachine& machine, standalone::Sm8521Cpu& cpu,
 
     standalone::AudioSynth sound;
     standalone::AudioOutput audio_output;
+    standalone::SerialLink serial_link;
     std::string audio_error;
     if (!audio_output.start(audio_error)) {
         std::fprintf(stderr, "Audio unavailable (%s); continuing silently.\n",
                      audio_error.c_str());
     }
+
+    auto apply_serial_mode = [&](bool announce) {
+        std::string serr;
+        switch (selection.serial_mode) {
+        case GC_SERIAL_OFF:
+            serial_link.disconnect();
+            gc_serial_set_inputs(&machine, true, true);
+            break;
+        case GC_SERIAL_MODEM:
+            serial_link.enable_virtual_modem();
+            if (!selection.phonebook_path.empty())
+                (void)serial_link.load_phonebook(selection.phonebook_path, &serr);
+            break;
+        case GC_SERIAL_TCP_HOST: {
+            std::string host;
+            std::uint16_t port = 1997;
+            if (!standalone::parse_host_port(selection.serial_endpoint, host, port, 1997))
+                port = 1997;
+            if (!serial_link.listen_tcp(port, &serr)) {
+                menubar.show_toast("TCP LISTEN FAILED: " + serr, 3.0);
+                return;
+            }
+            break;
+        }
+        case GC_SERIAL_TCP_CLIENT: {
+            std::string host = "127.0.0.1";
+            std::uint16_t port = 1997;
+            if (!standalone::parse_host_port(selection.serial_endpoint, host, port, 1997) ||
+                !serial_link.connect_tcp(host, port, &serr)) {
+                menubar.show_toast("TCP CONNECT FAILED: " + serr, 3.0);
+                return;
+            }
+            break;
+        }
+        }
+        if (announce) menubar.show_toast(serial_link.status_summary());
+    };
+    apply_serial_mode(false);
 
     std::array<std::uint32_t, GC_LCD_WIDTH * GC_LCD_HEIGHT> pixels{};
     std::vector<std::int16_t> audio_samples(4096u, 0);
@@ -347,9 +431,14 @@ int gc_sdl_session_run(GcMachine& machine, standalone::Sm8521Cpu& cpu,
         : "SELECT OR DRAG-AND-DROP YOUR FIRMWARE FOLDER AND OPTIONAL CARTRIDGE ROM.";
 
     auto boot_system = [&](bool bios_only) -> bool {
+        if (emulation_ready && !demo_mode)
+            (void)save_machine_nvram(machine, selection);
         reset_input_state();
         GcLaunchSelection boot_sel = selection;
-        if (bios_only) boot_sel.cartridge_path.clear();
+        if (bios_only) {
+            boot_sel.cartridge_path.clear();
+            boot_sel.cartridge2_path.clear();
+        }
         std::string err;
         if (!load_machine_media(machine, boot_sel, demo_mode, err)) {
             launcher_status = err;
@@ -359,6 +448,7 @@ int gc_sdl_session_run(GcMachine& machine, standalone::Sm8521Cpu& cpu,
         cpu.reset();
         cpu.set_external_vblank(true);
         nominal_cpu_hz = apply_cpu_clock();
+        apply_serial_mode(false);
         sound.reset();
         audio_cycle_remainder = 0;
         cycle_accum = 0.0;
@@ -384,10 +474,12 @@ int gc_sdl_session_run(GcMachine& machine, standalone::Sm8521Cpu& cpu,
 
     bool pending_pick_firmware = false;
     bool pending_pick_rom = false;
+    bool pending_pick_rom2 = false;
     bool pending_boot_after_rom = false;
     bool pending_controls = false;
     bool pending_custom_lcd = false;
     bool pending_custom_cpu = false;
+    bool pending_serial_endpoint = false;
     bool force_builtin_picker = false;
 
     while (!done) {
@@ -460,6 +552,16 @@ int gc_sdl_session_run(GcMachine& machine, standalone::Sm8521Cpu& cpu,
                     pending_boot_after_rom = !in_launcher || fw_ok;
                     force_builtin_picker = (SDL_GetModState() & KMOD_SHIFT) != 0;
                     break;
+                case GcMenuAction::LoadSlot2Rom:
+                    pending_pick_rom2 = true;
+                    force_builtin_picker = (SDL_GetModState() & KMOD_SHIFT) != 0;
+                    break;
+                case GcMenuAction::EjectSlot2Rom:
+                    selection.cartridge2_path.clear();
+                    gc_unload_cartridge_slot(&machine, 2u);
+                    (void)gc_save_launch_selection(selection);
+                    menubar.show_toast("SLOT 2 CARTRIDGE EJECTED");
+                    break;
                 case GcMenuAction::SetFirmwareFolder:
                     pending_pick_firmware = true;
                     force_builtin_picker = (SDL_GetModState() & KMOD_SHIFT) != 0;
@@ -472,15 +574,39 @@ int gc_sdl_session_run(GcMachine& machine, standalone::Sm8521Cpu& cpu,
                     demo_mode = false;
                     (void)boot_system(false);
                     break;
+                case GcMenuAction::SaveNvramNow: {
+                    std::string nerr;
+                    if (save_machine_nvram(machine, selection, &nerr))
+                        menubar.show_toast("SAVED 8KB SYSTEM NVRAM");
+                    else
+                        menubar.show_toast("NVRAM SAVE ERROR: " + nerr, 3.0);
+                    break;
+                }
+                case GcMenuAction::SeedWarmBootNvram:
+                    if (selection.warm_boot_nvram) {
+                        gc_nvram_seed_warm_boot(&machine);
+                        menubar.show_toast("WARM-BOOT NVRAM SEED ENABLED");
+                    } else {
+                        menubar.show_toast("WARM-BOOT NVRAM SEED DISABLED");
+                    }
+                    break;
+                case GcMenuAction::SerialModeChanged:
+                    apply_serial_mode(true);
+                    break;
+                case GcMenuAction::PromptSerialEndpoint:
+                    pending_serial_endpoint = true;
+                    break;
                 case GcMenuAction::ResetEmulation:
                     if (emulation_ready) {
                         if (demo_mode) {
                             (void)boot_system(false);
                         } else {
+                            (void)save_machine_nvram(machine, selection);
                             gc_machine_reset(&machine);
                             cpu.reset();
                             cpu.set_external_vblank(true);
                             nominal_cpu_hz = apply_cpu_clock();
+                            apply_serial_mode(false);
                             sound.reset();
                             reset_input_state();
                             lcd_texture_initialized = false;
@@ -554,7 +680,7 @@ int gc_sdl_session_run(GcMachine& machine, standalone::Sm8521Cpu& cpu,
                     menubar.show_toast(launcher_status);
                 } else if (fs::is_regular_file(p, ec) && !ec) {
                     const std::string fname = p.filename().string();
-                    if (fname == "internal.bin" || fname == "external.bin") {
+                    if (fname == "internal.bin" || fname == "external.bin" || fname == "boot.rom") {
                         selection.firmware_dir = p.parent_path().string();
                         (void)gc_save_launch_selection(selection);
                         menubar.show_toast("FIRMWARE FOLDER DETECTED");
@@ -717,8 +843,9 @@ int gc_sdl_session_run(GcMachine& machine, standalone::Sm8521Cpu& cpu,
         if (done) break;
 
         /* Handle deferred modal dialogs outside SDL_PollEvent loop. */
-        if (pending_pick_firmware || pending_pick_rom || pending_controls ||
-            pending_custom_lcd || pending_custom_cpu) {
+        if (pending_pick_firmware || pending_pick_rom || pending_pick_rom2 ||
+            pending_controls || pending_custom_lcd || pending_custom_cpu ||
+            pending_serial_endpoint) {
             reset_input_state();
             menubar.close();
 
@@ -733,11 +860,46 @@ int gc_sdl_session_run(GcMachine& machine, standalone::Sm8521Cpu& cpu,
                     selection.firmware_dir = path;
                     (void)gc_save_launch_selection(selection);
                     launcher_status = gc_ui_valid_firmware(path)
-                        ? "FIRMWARE READY."
-                        : "FOLDER SELECTED, BUT INTERNAL.BIN / EXTERNAL.BIN MISSING.";
+                        ? "FIRMWARE READY (INTERNAL.BIN OPTIONAL)."
+                        : "FOLDER SELECTED, BUT EXTERNAL.BIN / BOOT.ROM MISSING.";
                     menubar.show_toast(launcher_status);
                 }
                 force_builtin_picker = false;
+            }
+            if (pending_pick_rom2 && !done) {
+                pending_pick_rom2 = false;
+                std::string initial = selection.firmware_dir.empty()
+                    ? gc_ui_home_directory() : selection.firmware_dir;
+                if (!selection.cartridge2_path.empty())
+                    initial = fs::path(selection.cartridge2_path).parent_path().string();
+                else if (!selection.cartridge_path.empty())
+                    initial = fs::path(selection.cartridge_path).parent_path().string();
+                std::string path;
+                bool used_builtin = false;
+                if (gc_ui_pick_path(window, renderer, font, vsync_active, false,
+                                    initial, path, done, force_builtin_picker, used_builtin)) {
+                    char rerr[192] = {};
+                    if (gc_load_cartridge_slot(&machine, 2u, path.c_str(), rerr, sizeof(rerr))) {
+                        selection.cartridge2_path = path;
+                        (void)gc_save_launch_selection(selection);
+                        menubar.show_toast("SLOT 2 CARTRIDGE LOADED");
+                    } else {
+                        menubar.show_toast(std::string("SLOT 2 ERROR: ") + rerr, 3.0);
+                    }
+                }
+                force_builtin_picker = false;
+            }
+            if (pending_serial_endpoint && !done) {
+                pending_serial_endpoint = false;
+                std::string ep = selection.serial_endpoint;
+                if (gc_ui_prompt_text_modal(window, renderer, font, vsync_active,
+                        "2-PLAYER TCP JOIN", "ENTER HOST:PORT OF PEER EMULATOR:",
+                        selection.serial_endpoint, ep, done)) {
+                    selection.serial_endpoint = ep;
+                    selection.serial_mode = GC_SERIAL_TCP_CLIENT;
+                    (void)gc_save_launch_selection(selection);
+                    apply_serial_mode(true);
+                }
             }
             if (pending_pick_rom && !done) {
                 pending_pick_rom = false;
@@ -884,11 +1046,13 @@ int gc_sdl_session_run(GcMachine& machine, standalone::Sm8521Cpu& cpu,
             if (vblanks_due == 0u) {
                 const std::uint64_t target = step_start + total_cycles;
                 while (cpu.cycles() < target) (void)cpu.step();
+                serial_link.poll(machine, cpu);
             } else {
                 for (unsigned v = 0; v < vblanks_due; ++v) {
                     const std::uint64_t slice_target =
                         step_start + ((total_cycles * static_cast<std::uint64_t>(v + 1u)) / vblanks_due);
                     while (cpu.cycles() < slice_target) (void)cpu.step();
+                    serial_link.poll(machine, cpu);
                     cpu.trigger_vblank();
 
                     if (tap_pulse_active) {
@@ -988,6 +1152,9 @@ int gc_sdl_session_run(GcMachine& machine, standalone::Sm8521Cpu& cpu,
         }
     }
 
+    if (emulation_ready && !demo_mode)
+        (void)save_machine_nvram(machine, selection);
+    serial_link.disconnect();
     cpu.set_external_vblank(prev_ext_vblank);
     SDL_DestroyTexture(lcd_texture);
     SDL_DestroyRenderer(renderer);

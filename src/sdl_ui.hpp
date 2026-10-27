@@ -81,13 +81,25 @@ bool gc_ui_prompt_number_modal(SDL_Window *window, SDL_Renderer *renderer,
                                bool allow_decimal, double& out_value,
                                bool& quit_requested);
 
+bool gc_ui_prompt_text_modal(SDL_Window *window, SDL_Renderer *renderer,
+                             const GcUiFont& font, bool vsync_active,
+                             const std::string& title, const std::string& subtitle,
+                             const std::string& initial_value, std::string& out_value,
+                             bool& quit_requested);
+
 enum class GcMenuAction {
     None = 0,
     TimingChanged,
     LoadCartridgeRom,
+    LoadSlot2Rom,
+    EjectSlot2Rom,
     SetFirmwareFolder,
     BootBiosOnly,
     BootSelected,
+    SaveNvramNow,
+    SeedWarmBootNvram,
+    SerialModeChanged,
+    PromptSerialEndpoint,
     ResetEmulation,
     TogglePause,
     ToggleLauncherView,

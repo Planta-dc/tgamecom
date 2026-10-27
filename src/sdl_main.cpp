@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -41,16 +42,25 @@ std::string join_path(const std::string& directory, const char *name)
 void print_usage(const char *program)
 {
     std::cout << "Usage: " << program
-              << " [--launcher] [--firmware DIR] [--rom RAW-CARTRIDGE.bin]"
+              << " [--launcher] [--firmware DIR] [--rom SLOT1.bin] [--rom2 SLOT2.bin]"
+                 " [--nvram FILE] [--warm-boot]"
+                 " [--modem] [--phonebook FILE] [--link-listen PORT] [--link-connect HOST:PORT]"
                  " [--lcd-hz HZ] [--speed PERCENT] [--pace PERCENT]"
                  " [--touch-mode tap|debounce|hold] [--demo]\n"
                  "With no options, opens the interactive launcher.\n"
-                 "Firmware DIR must contain internal.bin and external.bin.\n"
-                 "Timing & input options (also adjustable live in the top menu bar):\n"
-                 "  --lcd-hz HZ        Emulated LCD VBlank refresh rate, 10..240 (default: 60)\n"
-                 "  --speed PERCENT    Emulated SM8521 CPU clock percent, 25..800 (default: 100)\n"
-                 "  --pace PERCENT     Overall emulation speed multiplier, 25..400 (default: 100)\n"
-                 "  --touch-mode MODE  tap (default, 1-scan pulse), debounce (2-scan), or hold\n"
+                 "Firmware DIR must contain external.bin (or boot.rom); internal.bin is optional.\n"
+                 "Timing, input, NVRAM & serial options (also adjustable live in the top menu bar):\n"
+                 "  --lcd-hz HZ           Emulated LCD VBlank refresh rate, 10..240 (default: 75.48 HW)\n"
+                 "  --speed PERCENT       Emulated SM8521 CPU clock percent of 5.00 MHz, 25..800 (default: 100)\n"
+                 "  --pace PERCENT        Overall emulation speed multiplier, 25..400 (default: 100)\n"
+                 "  --touch-mode MODE     tap (default, 1-scan pulse), debounce (2-scan), or hold\n"
+                 "  --rom2 PATH           Optional second cartridge in Slot 2 (P3=0x80)\n"
+                 "  --nvram PATH          8 KiB persistent SRAM file (default: config nvram.sav)\n"
+                 "  --warm-boot           Seed warm-boot NVRAM tuple at 0xFEE2..0xFEE7\n"
+                 "  --modem               Attach 9600-baud Virtual Hayes Modem + Text Portal\n"
+                 "  --phonebook PATH      MidiLink-style number=host:port dial map for --modem\n"
+                 "  --link-listen PORT    Host 2-player Compete.com link cable on TCP PORT\n"
+                 "  --link-connect H:P    Join 2-player Compete.com link cable at HOST:PORT\n"
                  "Default controls: arrows, A/B/C/D, M=menu, P=pause, S=sound, N=power; mouse=touch, Esc=quit\n"
                  "Right-click or Shift+Left-click always holds/drags stylus. Top menu bar controls all settings.\n";
 }
@@ -59,11 +69,14 @@ void print_usage(const char *program)
 
 int main(int argc, char **argv)
 {
+    namespace fs = std::filesystem;
     GcLaunchSelection selection = gc_load_launch_selection();
     std::string cli_firmware;
     std::string cli_rom;
+    std::string cli_rom2;
     bool has_cli_firmware = false;
     bool has_cli_rom = false;
+    bool has_cli_rom2 = false;
     bool demo = false;
     bool open_launcher = argc == 1;
 
@@ -74,6 +87,31 @@ int main(int argc, char **argv)
         } else if (std::strcmp(argv[i], "--rom") == 0 && i + 1 < argc) {
             cli_rom = argv[++i];
             has_cli_rom = true;
+        } else if (std::strcmp(argv[i], "--rom2") == 0 && i + 1 < argc) {
+            cli_rom2 = argv[++i];
+            has_cli_rom2 = true;
+        } else if (std::strcmp(argv[i], "--nvram") == 0 && i + 1 < argc) {
+            selection.nvram_path = argv[++i];
+        } else if (std::strcmp(argv[i], "--warm-boot") == 0) {
+            selection.warm_boot_nvram = true;
+        } else if (std::strcmp(argv[i], "--modem") == 0) {
+            selection.serial_mode = GC_SERIAL_MODEM;
+        } else if (std::strcmp(argv[i], "--phonebook") == 0 && i + 1 < argc) {
+            selection.phonebook_path = argv[++i];
+            selection.serial_mode = GC_SERIAL_MODEM;
+        } else if (std::strcmp(argv[i], "--link-listen") == 0 && i + 1 < argc) {
+            const char *port_str = argv[++i];
+            char *end = nullptr;
+            const unsigned long p = std::strtoul(port_str, &end, 10);
+            if (!end || *end != '\0' || p == 0ul || p > 65535ul) {
+                std::cerr << "Invalid --link-listen port (expected 1..65535).\n";
+                return 2;
+            }
+            selection.serial_mode = GC_SERIAL_TCP_HOST;
+            selection.serial_endpoint = std::string("0.0.0.0:") + port_str;
+        } else if (std::strcmp(argv[i], "--link-connect") == 0 && i + 1 < argc) {
+            selection.serial_mode = GC_SERIAL_TCP_CLIENT;
+            selection.serial_endpoint = argv[++i];
         } else if (std::strcmp(argv[i], "--lcd-hz") == 0 && i + 1 < argc) {
             char *end = nullptr;
             const double val = std::strtod(argv[++i], &end);
@@ -123,7 +161,7 @@ int main(int argc, char **argv)
         }
     }
 
-    if (demo && (has_cli_firmware || has_cli_rom)) {
+    if (demo && (has_cli_firmware || has_cli_rom || has_cli_rom2)) {
         std::cerr << "--demo is a standalone test; do not combine it with BIOS or cartridge boot.\n";
         return 2;
     }
@@ -136,6 +174,8 @@ int main(int argc, char **argv)
     if (has_cli_firmware) selection.firmware_dir = cli_firmware;
     if (has_cli_rom) selection.cartridge_path = cli_rom;
     else if (!open_launcher) selection.cartridge_path.clear();
+    if (has_cli_rom2) selection.cartridge2_path = cli_rom2;
+    else if (!open_launcher) selection.cartridge2_path.clear();
 
     auto machine = std::unique_ptr<GcMachine, decltype(&std::free)>(
         static_cast<GcMachine *>(std::calloc(1, sizeof(GcMachine))), &std::free);
@@ -148,19 +188,41 @@ int main(int argc, char **argv)
     if (!open_launcher) {
         char error[192] = {};
         if (!demo) {
-            const std::string internal_path = join_path(selection.firmware_dir, "internal.bin");
-            const std::string external_path = join_path(selection.firmware_dir, "external.bin");
-            if (!gc_load_firmware(machine.get(), internal_path.c_str(), external_path.c_str(),
-                                  error, sizeof(error))) {
+            std::error_code ec;
+            const std::string internal_cand = join_path(selection.firmware_dir, "internal.bin");
+            const bool has_internal = fs::is_regular_file(internal_cand, ec) && !ec;
+            ec.clear();
+            std::string external_path = join_path(selection.firmware_dir, "external.bin");
+            if (!fs::is_regular_file(external_path, ec) || ec) {
+                ec.clear();
+                const std::string alias = join_path(selection.firmware_dir, "boot.rom");
+                if (fs::is_regular_file(alias, ec) && !ec) external_path = alias;
+            }
+            if (!gc_load_firmware(machine.get(),
+                                  has_internal ? internal_cand.c_str() : nullptr,
+                                  external_path.c_str(), error, sizeof(error))) {
                 std::cerr << "Firmware load failed: " << error << '\n';
                 return 1;
             }
             if (!selection.cartridge_path.empty() &&
-                !gc_load_cartridge(machine.get(), selection.cartridge_path.c_str(),
-                                   error, sizeof(error))) {
+                !gc_load_cartridge_slot(machine.get(), 1u, selection.cartridge_path.c_str(),
+                                        error, sizeof(error))) {
                 std::cerr << "Cartridge load failed: " << error << '\n';
                 return 1;
             }
+            if (!selection.cartridge2_path.empty() &&
+                !gc_load_cartridge_slot(machine.get(), 2u, selection.cartridge2_path.c_str(),
+                                        error, sizeof(error))) {
+                std::cerr << "Slot 2 cartridge load failed: " << error << '\n';
+                return 1;
+            }
+            const std::string nvram = selection.nvram_path.empty()
+                ? gc_default_nvram_path() : selection.nvram_path;
+            ec.clear();
+            if (!nvram.empty() && fs::is_regular_file(nvram, ec) && !ec)
+                (void)gc_nvram_load(machine.get(), nvram.c_str(), error, sizeof(error));
+            if (selection.warm_boot_nvram)
+                gc_nvram_seed_warm_boot(machine.get());
         } else {
             constexpr std::size_t capacity = (200u * 40u / 2u) * 8u + 1u;
             std::vector<std::uint8_t> program(capacity);

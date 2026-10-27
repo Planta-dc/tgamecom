@@ -48,6 +48,13 @@ int main(void)
         ++failures;
     }
 
+    machine->bus.reg_file[0x30] = 0xB1; /* palette 3 + LCC[0] normal-black inversion */
+    if (!gc_lcd_render_argb(machine, pixels, STRIDE)) ++failures;
+    failures += expect_pixel(pixels, 0, 0, 0xFF000000u, "inverted dot 0 -> pen 0");
+    failures += expect_pixel(pixels, 0, 1, 0xFF6F8F4Fu, "inverted dot 1 -> pen 2 unchanged");
+    failures += expect_pixel(pixels, 0, 2, 0xFF8FCF8Fu, "inverted dot 2 -> pen 3");
+    failures += expect_pixel(pixels, 0, 3, 0xFFDFFF8Fu, "inverted dot 3 -> pen 4");
+
     machine->bus.reg_file[0x30] = 0x80; /* palette 0, page 0 */
     if (!gc_lcd_render_argb(machine, pixels, STRIDE)) ++failures;
     failures += expect_pixel(pixels, 0, 1, 0xFF8FCF8Fu, "palette 0 dot 1");

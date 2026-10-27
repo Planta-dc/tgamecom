@@ -33,13 +33,40 @@ static void test_reset_and_memory_map(void)
     assert(gc_bus_read(m, 0x2000) == 0x61);
     m->bus.rom[0x40000] = 0xB2; /* Cart bank 0x20 maps its 0x40000 offset. */
     m->bus.cart_present = true;
+    /* Writing a cart-range bank before P3 selects a slot latches immediately and
+       reads open-bus 0xFF until P3[7:6] activates slot 1 or slot 2. */
+    gc_bus_write(m, 0x25, 0x20);
+    assert(gc_bus_read(m, 0x2000) == 0xFF);
     gc_bus_write(m, 0x17, 0x40); /* P3 selects cartridge slot 1. */
-    gc_bus_write(m, 0x25, 0x20);
+    assert(m->bus.active_slot == 1u);
     assert(gc_bus_read(m, 0x2000) == 0xB2);
-    gc_bus_write(m, 0x17, 0x80); /* Single loaded cart can occupy selected slot 2 too. */
+    gc_bus_write(m, 0x17, 0x80); /* Empty slot 2 reads open-bus 0xFF. */
+    assert(m->bus.active_slot == 2u);
+    assert(!m->bus.cart_active);
+    assert(gc_bus_read(m, 0x2000) == 0xFF);
+
+    /* Populating cartridge slot 2 exposes independent Slot 2 ROM on P3=0x80. */
+    m->bus.rom2[0x40000] = 0xC3;
+    m->bus.cart2_present = true;
+    gc_bus_write(m, 0x17, 0x80);
+    assert(m->bus.cart_active && m->bus.active_slot == 2u);
+    assert(gc_bus_read(m, 0x2000) == 0xC3);
+    gc_bus_write(m, 0x17, 0x40);
+    assert(m->bus.cart_active && m->bus.active_slot == 1u);
+    assert(gc_bus_read(m, 0x2000) == 0xB2);
+    gc_bus_write(m, 0x17, 0x00); /* Deselecting both slots returns open-bus 0xFF. */
+    assert(!m->bus.cart_active && m->bus.active_slot == 0u);
+    assert(gc_bus_read(m, 0x2000) == 0xFF);
+
+    /* P3/P3C serial handshake lines (DTR=P3[0], RTS=P3[1], CTS=P3[2], DSR=P3[3]). */
+    gc_bus_write(m, 0x23, 0x82); /* P3[7:6] and P3[1:0] outputs; P3[3:2] inputs. */
+    gc_bus_write(m, 0x17, 0x41); /* Slot 1 active, RTS=0 (asserted low), DTR=1. */
     assert(m->bus.cart_active);
-    gc_bus_write(m, 0x25, 0x20);
-    assert(gc_bus_read(m, 0x2000) == 0xB2);
+    assert(gc_serial_dtr(m) && !gc_serial_rts(m));
+    gc_serial_set_inputs(m, false, true); /* CTS=0, DSR=1 */
+    assert((gc_bus_read(m, 0x17) & 0x0Cu) == 0x08u);
+    gc_serial_set_inputs(m, true, false); /* CTS=1, DSR=0 */
+    assert((gc_bus_read(m, 0x17) & 0x0Cu) == 0x04u);
 
     gc_bus_write(m, 0xA012, 0xE4);
     assert(gc_bus_read(m, 0xA012) == 0x00); /* CPU-visible VRAM reads use the MAME/MiSTer default. */
@@ -148,6 +175,60 @@ static void test_pio_controller_and_touch_inputs(void)
     assert(!m->bus.touch_strobed);
     assert(m->bus.reg_file[0x14] == 0xFFu);
     assert((m->bus.reg_file[0x15] & 0x03u) == 0x03u);
+
+    /* Unrecognized P1/P2 scan selector preserves previous P0/P1 hold state, and
+       all-ones selector (0xFFFF) updates only P0[1:0] while retaining P0[7:2]. */
+    gc_input_set_button(m, GC_BUTTON_LEFT, true); /* P0[2] = 0 */
+    gc_input_set_button(m, GC_BUTTON_D, true);    /* IN2[1] = 0 */
+    gc_bus_write(m, 0x15, 0xFF);
+    gc_bus_write(m, 0x16, 0x7F); /* Select main key row (0x7FFF). */
+    assert(m->bus.reg_file[0x14] == 0xFBu);
+    gc_bus_write(m, 0x16, 0x00); /* Unrecognized transient selector -> holds 0xFB. */
+    assert(m->bus.reg_file[0x14] == 0xFBu);
+    gc_bus_write(m, 0x16, 0xFF); /* 0xFFFF updates P0[1:0] (D=0) while keeping P0[2]=0 -> 0xF9. */
+    assert(m->bus.reg_file[0x14] == 0xF9u);
+    free(m);
+}
+
+static void test_nvram_and_synthesized_boot_rom(void)
+{
+    GcMachine *m = new_machine();
+    gc_nvram_seed_warm_boot(m);
+    assert(gc_bus_read(m, 0xFEE2u) == 0x01u);
+    assert(gc_bus_read(m, 0xFEE3u) == 0x09u);
+    assert(gc_bus_read(m, 0xFEE4u) == 0x09u);
+    assert(gc_bus_read(m, 0xFEE5u) == 0x07u);
+    assert(gc_bus_read(m, 0xFEE6u) == 0x00u);
+    assert(gc_bus_read(m, 0xFEE7u) == 0x04u);
+
+    gc_bus_write(m, 0xE123u, 0x5Au);
+    gc_bus_write(m, 0xFF80u, 0xA5u);
+    char err[128] = {0};
+    const char *tmp_nvram = "/tmp/tgamecom-test-nvram.sav";
+    assert(gc_nvram_save(m, tmp_nvram, err, sizeof(err)));
+
+    GcMachine *m2 = new_machine();
+    assert(gc_nvram_load(m2, tmp_nvram, err, sizeof(err)));
+    remove(tmp_nvram);
+    assert(gc_bus_read(m2, 0xE123u) == 0x5Au);
+    assert(gc_bus_read(m2, 0xFF80u) == 0xA5u);
+    assert(gc_bus_read(m2, 0xFEE5u) == 0x07u);
+    free(m2);
+
+    /* Clean-room internal boot ROM initializes MMU1/2/4, SP, SYS and jumps to 0x2054. */
+    gc_machine_init(m);
+    gc_synthesize_boot_rom(m);
+    m->bus.system_rom[0x4054u] = 0xF1u; /* Bank 2 offset 0x0054 -> 0x2054: HALT */
+    GcStepResult res = GC_STEP_OK;
+    while (res == GC_STEP_OK && m->cpu.instructions < 32u)
+        res = gc_cpu_step(m);
+    assert(res == GC_STEP_HALTED);
+    assert(m->cpu.pc == 0x2055u);
+    assert(m->bus.reg_file[0x19] == 0x46u);
+    assert(gc_cpu_sp(m) == 0x03C0u);
+    assert(m->bus.mapped_bank[1] == 2u);
+    assert(m->bus.mapped_bank[2] == 4u);
+    assert(m->bus.mapped_bank[4] == 3u);
     free(m);
 }
 
@@ -186,6 +267,7 @@ int main(void)
     test_flags_and_unknown_dm_fallback();
     test_cpu_vram_store_instruction();
     test_pio_controller_and_touch_inputs();
+    test_nvram_and_synthesized_boot_rom();
     test_homebrew_vram_demo_runs_on_cpu();
     puts("All core tests passed, including the homebrew VRAM demo.");
     return 0;

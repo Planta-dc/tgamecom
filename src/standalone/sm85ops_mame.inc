@@ -32,17 +32,17 @@
 			break; \
 		case 0x40: \
 			s2 = mem_readbyte( r1 & 0x07 ); \
-			mem_writebyte( r1 & 0x07, s2 + 1 ); \
+			mem_writebyte( r1 & 0x07, ( s2 + 1 ) & 0xFF ); \
 			break; \
 		case 0x80: \
 			s2 = mem_readbyte( m_PC++ ); \
 			if ( r1 & 0x07 ) { \
-				s2 = s2 + mem_readbyte( r1 & 0x07 ); \
+				s2 = ( s2 + mem_readbyte( r1 & 0x07 ) ) & 0xFF; \
 			} \
 			break; \
 		case 0xC0: \
-			s2 = mem_readbyte( r1 & 0x07 ); \
-			mem_writebyte( r1 & 0x07, s2 - 1 ); \
+			s2 = ( mem_readbyte( r1 & 0x07 ) - 1 ) & 0xFF; \
+			mem_writebyte( r1 & 0x07, s2 ); \
 			break; \
 		} \
 		r2 = r1; \
@@ -162,7 +162,7 @@
 		s2 = 1 << ( r1 & 0x07 ); \
 		d1 = mem_readbyte( m_PC++ ); \
 		if ( r1 & 0x38 ) { \
-			s1 = d1 + mem_readbyte( ( r1 >> 3 ) & 0x07 ); \
+			s1 = ( d1 + mem_readbyte( ( r1 >> 3 ) & 0x07 ) ) & 0xFF; \
 		} else { \
 			s1 = 0xFF00 + d1; \
 		}
@@ -171,7 +171,7 @@
 			s2 = 1 << ( r1 & 0x07 ); \
 			d1 = mem_readbyte( m_PC++ ); \
 			if ( r1 & 0x38 ) { \
-				s1 = d1 + mem_readbyte( ( r1 >> 3 ) & 0x07 ); \
+				s1 = ( d1 + mem_readbyte( ( r1 >> 3 ) & 0x07 ) ) & 0xFF; \
 			} else { \
 				s1 = 0xFF00 + d1; \
 			} \
@@ -1283,74 +1283,66 @@ case 0x59:  /* Invalid - 2? cycles - Flags affected: --------? */
 	logerror( "%04X: unk%02x, unhandled\n", m_PC-1,op );
 	mycycles += 2;
 	break;
-case 0x5A:  /* indirect CMP - 7,8,12,9,8 cycles */
+case 0x5A:  /* indirect CMP - 7,8,11,9 cycles */
 	ARG_iR;
 	switch (r2 & 0xc0)
 	{
 		case 0x00:
-		// 5A 02 09 (used in calculator @ 493A and 4941. Used in Defender II @ 6DC9).
-		// Assuming it to be a compare of the literal last number against contents of (contents of r02).
-			//logerror( "%04X: unk%02X %02X %02X\n", m_PC-3,op,r2,r1 );
 			s1 = mem_readbyte(r2 & 7);
 			OP_CMP8( mem_readbyte(s1), r1 );
 			break;
 		case 0x40:
-			s1 = r2 & 7;    // s1 = primary reg
-			res = mem_readbyte(s1);   // res = secondary reg#
+			s1 = r2 & 7;
+			res = mem_readbyte(s1);
 			OP_CMP8( mem_readbyte(res), r1 );
-			mem_writebyte(s1, res+1);       // inc res
+			mem_writebyte(s1, (res + 1) & 0xFF);
+			mycycles += 1;
 			break;
 		case 0x80:
-		// 5A 86 C6 00 (used in Henry @ 495B, when you guess wrongly in practice mode).
-		// 5A 87 C6 00 (used in Henry @ 7073, when you guess wrongly in competition mode).
-		// Assuming it to be a compare of the literal last number against contents of (contents r06 + offset C6).
 			s1 = r1;
 			ARG_R;
-			//logerror( "%04X: unk%02X %02X %02X %02X\n", m_PC-4,op,r2,s1,r1 );
-			s1 += mem_readbyte(r2 & 7);
+			s1 = (s1 + mem_readbyte(r2 & 7)) & 0xFF;
 			OP_CMP8( mem_readbyte(s1), r1 );
 			mycycles += 4;
 			break;
 		case 0xC0:
-			s1 = r2 & 7;    // s1 = primary reg
-			res = mem_readbyte(s1) - 1;   // res = secondary reg#
-			mem_writebyte(s1, res);       // dec res
+			s1 = r2 & 7;
+			res = (mem_readbyte(s1) - 1) & 0xFF;
+			mem_writebyte(s1, res);
 			OP_CMP8( mem_readbyte(res), r1 );
+			mycycles += 2;
 			break;
 	}
 	mycycles += 7;
 	break;
-case 0x5B:  /* indirect MOV - 6,7,11,8,7 cycles */
-/* Only one variant is used in gamecom: 5B 42 00
-         Example:
-         move r02, E9
-         5b 42 00     (move 00 into register E9, then increment r02) */
+case 0x5B:  /* indirect MOV - 6,7,10,8 cycles */
 	ARG_iR;
 	switch (r2 & 0xc0)
 	{
 		case 0x00:
 			s1 = mem_readbyte(r2 & 7);
-			mem_writebyte( mem_readbyte(s1), r1 );
+			mem_writebyte(s1, r1);
 			break;
 		case 0x40:
-			//logerror( "%04X: unk%02X %02X %02X\n", m_PC-3,op,r2,r1 );
 			s1 = r2 & 7;
 			res = mem_readbyte(s1);
 			mem_writebyte(res, r1);
-			mem_writebyte(s1, res + 1);
+			mem_writebyte(s1, (res + 1) & 0xFF);
+			mycycles += 1;
 			break;
 		case 0x80:
 			s1 = r1;
 			ARG_R;
-			s1 += mem_readbyte(r2 & 7);
+			s1 = (s1 + mem_readbyte(r2 & 7)) & 0xFF;
 			mycycles += 4;
-			mem_writebyte(mem_readbyte(s1), r1);
+			mem_writebyte(s1, r1);
 			break;
 		case 0xC0:
 			s1 = r2 & 7;
-			res = mem_readbyte(s1) - 1;
+			res = (mem_readbyte(s1) - 1) & 0xFF;
 			mem_writebyte(s1, res);
-			mem_writebyte(mem_readbyte(res), r1);
+			mem_writebyte(res, r1);
+			mycycles += 2;
 			break;
 	}
 	mycycles += 6;
@@ -1697,12 +1689,14 @@ case 0xEF:  /* CALS 1xWW - 12,9 cycles - Flags affected: -------- */
 	break;
 case 0xF0:  /* STOP - 2 cycles - Flags affected: -------- */
 	mycycles += 2;
-	if ( m_clock_changed ) {
-		/* TODO: Set system clock divider */
-		/* TODO: Add a bunch of additional cycles */
-		m_clock_changed = 0;
+	if ( m_CKC & 0x80u ) {
+		commit_ckc_prescale();
 	}
-	//logerror( "%04X: %02x, cpu-clock-change, unhandled\n", m_PC-1,op ); // fills up error log when unit sleeps
+	if ( m_stop_mode_enabled ) {
+		m_stopped = 1;
+		m_machine.cpu.stopped = true;
+	}
+	m_clock_changed = 0;
 	break;
 case 0xF1:  /* HALT - 2 cycles - Flags affected: -------- */
 	m_halted = 1;
@@ -1728,6 +1722,7 @@ case 0xF9:  /* IRET - 12,10 cycles - Flags affected: CZSVDHBI */
 	POP8( r1 );
 	POP8( r2 );
 	m_PC = ( r1 << 8 ) | r2;
+	m_irq_defer_one = true;
 	mycycles += ( ( m_SYS & 0x40 ) ? 12 : 10 );
 	break;
 case 0xFA:  /* CLRC - 2 cycles - Flags affected: C------- */

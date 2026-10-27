@@ -10,10 +10,17 @@ enum GcTouchMode : unsigned {
     GC_TOUCH_HOLD_DRAG = 2      /* Continuous stylus contact while mouse button is held. */
 };
 
+enum GcSerialMode : unsigned {
+    GC_SERIAL_OFF = 0,
+    GC_SERIAL_MODEM = 1,      /* Virtual 9600-baud Hayes AT modem + text portal / TCP dialer. */
+    GC_SERIAL_TCP_HOST = 2,   /* 2-player Compete.com null-modem TCP host. */
+    GC_SERIAL_TCP_CLIENT = 3  /* 2-player Compete.com null-modem TCP client. */
+};
+
 struct GcTimingOptions {
-    double lcd_hz = 60.0;               /* Emulated LCD VBlank refresh rate (Hz), decoupled from monitor VSync & CPU. */
-    unsigned cpu_speed_percent = 100;   /* Emulated SM8521 CPU clock scale (% of 5.5296 MHz). */
-    unsigned game_pace_percent = 100;   /* Overall emulation pace multiplier (%, scales CPU + LCD together). */
+    double lcd_hz = 5000000.0 / 66240.0; /* Native SM8521 LCDC VBlank (~75.483 Hz = 5 MHz / (320 * 207)). */
+    unsigned cpu_speed_percent = 100;    /* Emulated SM8521 CPU clock scale (% of 5.000 MHz phi0). */
+    unsigned game_pace_percent = 100;    /* Overall emulation pace multiplier (%, scales CPU + LCD together). */
     GcTouchMode touch_mode = GC_TOUCH_SINGLE_TAP;
     bool audio_muted = false;
     unsigned audio_volume_percent = 100;
@@ -24,6 +31,12 @@ struct GcTimingOptions {
 struct GcLaunchSelection {
     std::string firmware_dir;
     std::string cartridge_path;
+    std::string cartridge2_path;
+    std::string nvram_path;
+    bool warm_boot_nvram = false;
+    GcSerialMode serial_mode = GC_SERIAL_OFF;
+    std::string serial_endpoint = "127.0.0.1:1997";
+    std::string phonebook_path;
     GcTimingOptions timing{};
 };
 
@@ -53,6 +66,7 @@ bool gc_save_input_bindings(const GcInputBindings& bindings);
 
 GcLaunchSelection gc_load_launch_selection();
 bool gc_save_launch_selection(const GcLaunchSelection& selection);
+std::string gc_default_nvram_path();
 
 // Opens the standalone launcher window; returns true when the user chose to boot, false on quit.
 bool gc_sdl_launcher_run(GcLaunchSelection& selection, GcInputBindings& bindings);
