@@ -74,6 +74,15 @@ struct ButtonEvent {
     bool active = false;
 };
 
+struct TouchEvent {
+    std::uint64_t start = 0;
+    std::uint64_t duration = 0;
+    std::uint64_t end = 0;
+    unsigned column = 0;
+    unsigned row = 0;
+    bool active = false;
+};
+
 static std::string join_path(const std::string& directory, const char *filename)
 {
     std::string path = directory;
@@ -123,10 +132,10 @@ struct TraceEntry {
 
 int main(int argc, char **argv)
 {
-    if (argc < 2 || argc > 30) {
+    if (argc < 2 || argc > 128) {
         std::cerr << "Usage: gamecom-boot <firmware-dir> [cartridge.bin|-] [step-limit] [frame.ppm] "
-                     "[--touch step column row duration] [--button step name duration ...]\n"
-                     "Default step limit: 20000000; button names: up/down/left/right/menu/pause/sound/a/b/c/d/power\n"
+                     "[--touch step column row duration ...] [--button step name duration ...]\n"
+                     "Default step limit: 20000000; both event options may be repeated. Button names: up/down/left/right/menu/pause/sound/a/b/c/d/power\n"
                      "Example: gamecom-boot firmware Centipede.bin 80000000 frame.ppm "
                      "--touch 10000000 2 3 300000 --button 41000000 a 300000 --button 68000000 a 300000\n";
         return 2;
@@ -144,21 +153,33 @@ int main(int argc, char **argv)
     const char *frame_path = nullptr;
     if (optional_arg < argc && argv[optional_arg][0] != '-')
         frame_path = argv[optional_arg++];
-    bool touch_scheduled = false;
-    std::uint64_t touch_start = 0, touch_duration = 0, touch_column = 0, touch_row = 0;
-    std::uint64_t touch_end = 0;
+    std::vector<TouchEvent> touch_events;
     std::vector<ButtonEvent> button_events;
     while (optional_arg < argc) {
         const std::string option(argv[optional_arg]);
-        if (option == "--touch" && !touch_scheduled && argc - optional_arg >= 5 &&
-            parse_decimal_u64(argv[optional_arg + 1], touch_start) &&
-            parse_decimal_u64(argv[optional_arg + 2], touch_column) &&
-            parse_decimal_u64(argv[optional_arg + 3], touch_row) &&
-            parse_decimal_u64(argv[optional_arg + 4], touch_duration) &&
-            touch_column < 13 && touch_row < 10 && touch_duration > 0 &&
-            touch_start < instruction_limit && touch_duration <= instruction_limit - touch_start) {
-            touch_end = touch_start + touch_duration;
-            touch_scheduled = true;
+        if (option == "--touch" && argc - optional_arg >= 5) {
+            TouchEvent event;
+            std::uint64_t column = 0, row = 0;
+            if (!parse_decimal_u64(argv[optional_arg + 1], event.start) ||
+                !parse_decimal_u64(argv[optional_arg + 2], column) ||
+                !parse_decimal_u64(argv[optional_arg + 3], row) ||
+                !parse_decimal_u64(argv[optional_arg + 4], event.duration) ||
+                column >= 13 || row >= 10 || event.duration == 0 ||
+                event.start >= instruction_limit ||
+                event.duration > instruction_limit - event.start) {
+                std::cerr << "Invalid touch event. Use: --touch step column(0-12) row(0-9) duration.\n";
+                return 2;
+            }
+            event.column = static_cast<unsigned>(column);
+            event.row = static_cast<unsigned>(row);
+            event.end = event.start + event.duration;
+            for (const TouchEvent& existing : touch_events) {
+                if (event.start < existing.end && existing.start < event.end) {
+                    std::cerr << "Overlapping stylus presses are not supported.\n";
+                    return 2;
+                }
+            }
+            touch_events.push_back(event);
             optional_arg += 5;
         } else if (option == "--button" && argc - optional_arg >= 4) {
             ButtonEvent event;
@@ -182,9 +203,9 @@ int main(int argc, char **argv)
             button_events.push_back(event);
             optional_arg += 4;
         } else {
-            std::cerr << "Invalid or duplicate event near '" << argv[optional_arg]
-                      << "'. Touch: --touch step column(0-12) row(0-9) duration. "
-                         "Button: --button step name duration. Events must fit within the step limit.\n";
+            std::cerr << "Invalid event near '" << argv[optional_arg]
+                      << "'. Repeat --touch step column(0-12) row(0-9) duration and/or "
+                         "--button step name duration. Events must fit within the step limit.\n";
             return 2;
         }
     }
@@ -216,10 +237,10 @@ int main(int argc, char **argv)
     std::cout << "Game.com firmware boot probe\n"
               << "Reset PC: 0x1020; firmware loaded; cartridge: "
               << (argc >= 3 && std::string(argv[2]) != "-" ? argv[2] : "none") << '\n';
-    if (touch_scheduled)
-        std::cout << "Scheduled stylus press: step " << touch_start << ", column "
-                  << touch_column << ", row " << touch_row << ", duration "
-                  << touch_duration << " steps\n";
+    for (const TouchEvent& event : touch_events)
+        std::cout << "Scheduled stylus press: step " << event.start << ", column "
+                  << event.column << ", row " << event.row << ", duration "
+                  << event.duration << " steps\n";
     for (const ButtonEvent& event : button_events)
         std::cout << "Scheduled button press: " << button_name(event.button)
                   << ", step " << event.start << ", duration " << event.duration << " steps\n";
@@ -228,17 +249,16 @@ int main(int argc, char **argv)
     std::array<TraceEntry, 32> tail{};
     std::size_t tail_pos = 0;
     std::uint64_t steps = 0;
-    bool touch_is_down = false;
     while (steps < instruction_limit) {
-        if (touch_scheduled && steps == touch_start) {
-            (void)gc_input_set_touch(machine.get(), true,
-                                     static_cast<unsigned>(touch_column),
-                                     static_cast<unsigned>(touch_row));
-            touch_is_down = true;
-        }
-        if (touch_is_down && steps == touch_end) {
-            (void)gc_input_set_touch(machine.get(), false, 0, 0);
-            touch_is_down = false;
+        for (TouchEvent& event : touch_events) {
+            if (event.active && steps == event.end) {
+                (void)gc_input_set_touch(machine.get(), false, 0, 0);
+                event.active = false;
+            }
+            if (!event.active && steps == event.start) {
+                (void)gc_input_set_touch(machine.get(), true, event.column, event.row);
+                event.active = true;
+            }
         }
         for (ButtonEvent& event : button_events) {
             if (!event.active && steps == event.start) {
@@ -269,7 +289,12 @@ int main(int argc, char **argv)
                       << std::setfill(' ');
         }
     }
-    if (touch_is_down) (void)gc_input_set_touch(machine.get(), false, 0, 0);
+    for (TouchEvent& event : touch_events) {
+        if (event.active) {
+            (void)gc_input_set_touch(machine.get(), false, 0, 0);
+            event.active = false;
+        }
+    }
     for (ButtonEvent& event : button_events) {
         if (event.active) gc_input_set_button(machine.get(), event.button, false);
     }
