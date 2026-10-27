@@ -22,10 +22,13 @@ AUDIO_SYNTH_OBJ = src/standalone/audio_synth.o
 ifeq ($(HOST_OS),Linux)
 MINIAUDIO_LDLIBS = -ldl -lpthread -lm
 SDL_PORTABLE_LDFLAGS ?= -static-libstdc++ -static-libgcc
-GTK3_AVAILABLE := $(shell pkg-config --exists gtk+-3.0 && echo 1)
+USE_GTK3 ?= 0
+ifeq ($(USE_GTK3),1)
+GTK3_AVAILABLE := $(shell pkg-config --exists gtk+-3.0 2>/dev/null && echo 1)
 ifeq ($(GTK3_AVAILABLE),1)
-GTK3_CFLAGS := $(shell pkg-config --cflags gtk+-3.0)
-GTK3_LDLIBS := $(shell pkg-config --libs gtk+-3.0)
+GTK3_CFLAGS := $(shell pkg-config --cflags gtk+-3.0 2>/dev/null)
+GTK3_LDLIBS := $(shell pkg-config --libs gtk+-3.0 2>/dev/null)
+endif
 endif
 else ifeq ($(HOST_OS),Darwin)
 MINIAUDIO_LDLIBS = -lpthread -lm -framework CoreAudio -framework AudioToolbox -framework CoreFoundation
@@ -93,13 +96,13 @@ tests/test_video.o: include/gamecom_video.h
 
 ifeq ($(SDL_AVAILABLE),1)
 SDL_OBJECTS = src/sdl_main.o src/sdl_frontend.o src/sdl_launcher.o src/audio_output.o $(AUDIO_SYNTH_OBJ)
-src/sdl_main.o src/sdl_frontend.o src/sdl_launcher.o: CPPFLAGS += $(shell pkg-config --cflags sdl2)
+src/sdl_main.o src/sdl_frontend.o src/sdl_launcher.o: CPPFLAGS += $(shell pkg-config --cflags sdl2 2>/dev/null)
 ifeq ($(GTK3_AVAILABLE),1)
 src/sdl_launcher.o: CPPFLAGS += $(GTK3_CFLAGS) -DGAMECOM_HAVE_GTK3=1
 endif
-src/sdl_main.o src/sdl_frontend.o: include/gamecom_launcher.hpp
+src/sdl_main.o src/sdl_frontend.o src/sdl_launcher.o: include/gamecom_launcher.hpp
 gamecom-sdl: $(CORE_OBJ) $(DEMO_OBJ) $(STANDALONE_CPU_OBJ) $(SDL_OBJECTS)
-	$(CXX) $(CXXFLAGS) $(CXX_WARNINGS) $(SDL_PORTABLE_LDFLAGS) -o $@ $^ $(shell pkg-config --libs sdl2) $(GTK3_LDLIBS) $(MINIAUDIO_LDLIBS)
+	$(CXX) $(CXXFLAGS) $(CXX_WARNINGS) $(SDL_PORTABLE_LDFLAGS) -o $@ $^ $(shell pkg-config --libs sdl2 2>/dev/null) $(GTK3_LDLIBS) $(MINIAUDIO_LDLIBS)
 endif
 
 sdl:

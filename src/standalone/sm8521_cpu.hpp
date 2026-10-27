@@ -36,6 +36,11 @@ public:
     void clear_uart_transmits() noexcept { m_uart_transmits.clear(); }
     bool queue_uart_receive(uint8_t value);
     void resume() noexcept { m_halted = 0; }
+    void set_external_vblank(bool enabled) noexcept { m_external_vblank = enabled; }
+    bool external_vblank() const noexcept { return m_external_vblank; }
+    void trigger_vblank() noexcept;
+    void set_clock_hz(uint32_t cpu_hz) noexcept;
+    uint32_t clock_hz() const noexcept { return m_cpu_hz; }
 
 private:
     friend struct Sm8521CpuTestAccess;
@@ -87,6 +92,8 @@ private:
     uint16_t m_IFLAGS = 0;
     bool m_check_interrupts = false;
     TimerState m_timers[2]{};
+    uint32_t m_cpu_hz = GC_CPU_HZ;
+    bool m_external_vblank = false;
     uint64_t m_next_vblank = 92573; /* MAME's ~59.732 Hz screen timing, in CPU cycles. */
     uint64_t m_next_clock_tick = 0;
     uint64_t m_clock_tick_period = 5529600;

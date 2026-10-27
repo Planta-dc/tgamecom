@@ -6,6 +6,7 @@
 #include "gamecom_launcher.hpp"
 
 int gc_sdl_frontend_run(GcMachine& machine, standalone::Sm8521Cpu& cpu,
-                        const GcInputBindings& bindings);
+                        const GcInputBindings& bindings,
+                        const GcTimingOptions& timing = GcTimingOptions{});
 
 #endif

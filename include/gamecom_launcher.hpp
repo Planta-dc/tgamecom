@@ -4,9 +4,15 @@
 #include <array>
 #include <string>
 
+struct GcTimingOptions {
+    double lcd_hz = 60.0;             /* Emulated LCD VBlank refresh rate (Hz), decoupled from host VSync & CPU Hz. */
+    unsigned cpu_speed_percent = 100; /* Emulated SM8521 CPU clock scale (% of 5.5296 MHz). */
+};
+
 struct GcLaunchSelection {
     std::string firmware_dir;
     std::string cartridge_path;
+    GcTimingOptions timing{};
 };
 
 enum GcControlIndex : unsigned {
@@ -32,6 +38,9 @@ struct GcInputBindings {
 GcInputBindings gc_default_input_bindings();
 GcInputBindings gc_load_input_bindings();
 bool gc_save_input_bindings(const GcInputBindings& bindings);
+
+GcLaunchSelection gc_load_launch_selection();
+bool gc_save_launch_selection(const GcLaunchSelection& selection);
 
 // Opens the launcher; returns true when the user chose to boot, false on quit.
 bool gc_sdl_launcher_run(GcLaunchSelection& selection, GcInputBindings& bindings);

@@ -20,7 +20,8 @@ public:
     void render(const std::vector<SoundRegisterWrite>& writes,
                 std::uint64_t start_cycle, std::uint64_t end_cycle,
                 std::int16_t *output, std::size_t frames,
-                unsigned sample_rate) noexcept;
+                unsigned sample_rate,
+                std::uint32_t cpu_hz = GC_CPU_HZ) noexcept;
 
 private:
     struct Channel {
@@ -29,7 +30,7 @@ private:
     };
 
     void apply_write(const SoundRegisterWrite& write) noexcept;
-    void advance_cycles(std::uint64_t cycles) noexcept;
+    void advance_cycles(std::uint64_t cycles, std::uint32_t cpu_hz) noexcept;
     float channel_value(unsigned channel) const noexcept;
     float direct_dac_value() const noexcept;
 
