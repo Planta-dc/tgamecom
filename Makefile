@@ -101,6 +101,7 @@ ifeq ($(GTK3_AVAILABLE),1)
 src/sdl_launcher.o: CPPFLAGS += $(GTK3_CFLAGS) -DGAMECOM_HAVE_GTK3=1
 endif
 src/sdl_main.o src/sdl_frontend.o src/sdl_launcher.o: include/gamecom_launcher.hpp
+src/sdl_frontend.o src/sdl_launcher.o: src/sdl_ui.hpp
 gamecom-sdl: $(CORE_OBJ) $(DEMO_OBJ) $(STANDALONE_CPU_OBJ) $(SDL_OBJECTS)
 	$(CXX) $(CXXFLAGS) $(CXX_WARNINGS) $(SDL_PORTABLE_LDFLAGS) -o $@ $^ $(shell pkg-config --libs sdl2 2>/dev/null) $(GTK3_LDLIBS) $(MINIAUDIO_LDLIBS)
 endif

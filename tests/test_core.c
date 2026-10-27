@@ -137,10 +137,15 @@ static void test_pio_controller_and_touch_inputs(void)
     m = new_machine();
     assert(!gc_input_set_touch(m, true, 13, 0));
     assert(gc_input_set_touch(m, true, 1, 5));
-    gc_bus_write(m, 0x15, 0xF7); /* Select touch column 1 (mux 0xFFF7). */
+    assert(!m->bus.touch_strobed);
+    gc_bus_write(m, 0x15, 0xFB); /* Select untouched column 0 (mux 0xFFFB). */
+    assert(!m->bus.touch_strobed);
+    gc_bus_write(m, 0x15, 0xF7); /* Select touched column 1 (mux 0xFFF7). */
+    assert(m->bus.touch_strobed);
     assert(m->bus.reg_file[0x14] == 0xDFu); /* Active-low row 5. */
     assert((m->bus.reg_file[0x15] & 0x03u) == 0x03u);
     assert(gc_input_set_touch(m, false, 0, 0));
+    assert(!m->bus.touch_strobed);
     assert(m->bus.reg_file[0x14] == 0xFFu);
     assert((m->bus.reg_file[0x15] & 0x03u) == 0x03u);
     free(m);

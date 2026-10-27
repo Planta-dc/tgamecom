@@ -12,7 +12,6 @@
 #include <iostream>
 #include <memory>
 #include <string>
-#include <utility>
 #include <vector>
 
 namespace {
@@ -43,35 +42,38 @@ void print_usage(const char *program)
 {
     std::cout << "Usage: " << program
               << " [--launcher] [--firmware DIR] [--rom RAW-CARTRIDGE.bin]"
-                 " [--lcd-hz HZ] [--speed PERCENT] [--demo]\n"
+                 " [--lcd-hz HZ] [--speed PERCENT] [--pace PERCENT]"
+                 " [--touch-mode tap|debounce|hold] [--demo]\n"
                  "With no options, opens the interactive launcher.\n"
                  "Firmware DIR must contain internal.bin and external.bin.\n"
-                 "Timing options (decoupled from monitor VSync):\n"
-                 "  --lcd-hz HZ      Emulated LCD VBlank refresh rate, 10..240 (default: 60)\n"
-                 "  --speed PERCENT  Emulated SM8521 CPU clock percent, 25..800 (default: 100)\n"
+                 "Timing & input options (also adjustable live in the top menu bar):\n"
+                 "  --lcd-hz HZ        Emulated LCD VBlank refresh rate, 10..240 (default: 60)\n"
+                 "  --speed PERCENT    Emulated SM8521 CPU clock percent, 25..800 (default: 100)\n"
+                 "  --pace PERCENT     Overall emulation speed multiplier, 25..400 (default: 100)\n"
+                 "  --touch-mode MODE  tap (default, 1-scan pulse), debounce (2-scan), or hold\n"
                  "Default controls: arrows, A/B/C/D, M=menu, P=pause, S=sound, N=power; mouse=touch, Esc=quit\n"
-                 "In-game hotkeys: F5/F6=CPU speed, F7=LCD Hz, hold F8=4x fast-forward\n"
-                 "Keyboard bindings and timing defaults can be changed in the launcher.\n";
+                 "Right-click or Shift+Left-click always holds/drags stylus. Top menu bar controls all settings.\n";
 }
 
 } // namespace
 
 int main(int argc, char **argv)
 {
-    GcLaunchSelection saved = gc_load_launch_selection();
-    std::string firmware_dir;
-    std::string cartridge_path;
-    GcTimingOptions timing = saved.timing;
-    bool cli_lcd_hz = false;
-    bool cli_speed = false;
+    GcLaunchSelection selection = gc_load_launch_selection();
+    std::string cli_firmware;
+    std::string cli_rom;
+    bool has_cli_firmware = false;
+    bool has_cli_rom = false;
     bool demo = false;
     bool open_launcher = argc == 1;
 
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--firmware") == 0 && i + 1 < argc) {
-            firmware_dir = argv[++i];
+            cli_firmware = argv[++i];
+            has_cli_firmware = true;
         } else if (std::strcmp(argv[i], "--rom") == 0 && i + 1 < argc) {
-            cartridge_path = argv[++i];
+            cli_rom = argv[++i];
+            has_cli_rom = true;
         } else if (std::strcmp(argv[i], "--lcd-hz") == 0 && i + 1 < argc) {
             char *end = nullptr;
             const double val = std::strtod(argv[++i], &end);
@@ -79,8 +81,7 @@ int main(int argc, char **argv)
                 std::cerr << "Invalid --lcd-hz value (expected 10..240).\n";
                 return 2;
             }
-            timing.lcd_hz = val;
-            cli_lcd_hz = true;
+            selection.timing.lcd_hz = val;
         } else if (std::strcmp(argv[i], "--speed") == 0 && i + 1 < argc) {
             char *end = nullptr;
             const unsigned long val = std::strtoul(argv[++i], &end, 10);
@@ -88,8 +89,27 @@ int main(int argc, char **argv)
                 std::cerr << "Invalid --speed percentage (expected 25..800).\n";
                 return 2;
             }
-            timing.cpu_speed_percent = static_cast<unsigned>(val);
-            cli_speed = true;
+            selection.timing.cpu_speed_percent = static_cast<unsigned>(val);
+        } else if (std::strcmp(argv[i], "--pace") == 0 && i + 1 < argc) {
+            char *end = nullptr;
+            const unsigned long val = std::strtoul(argv[++i], &end, 10);
+            if (!end || *end != '\0' || val < 25ul || val > 400ul) {
+                std::cerr << "Invalid --pace percentage (expected 25..400).\n";
+                return 2;
+            }
+            selection.timing.game_pace_percent = static_cast<unsigned>(val);
+        } else if (std::strcmp(argv[i], "--touch-mode") == 0 && i + 1 < argc) {
+            const char *mode = argv[++i];
+            if (std::strcmp(mode, "tap") == 0)
+                selection.timing.touch_mode = GC_TOUCH_SINGLE_TAP;
+            else if (std::strcmp(mode, "debounce") == 0)
+                selection.timing.touch_mode = GC_TOUCH_DEBOUNCED_TAP;
+            else if (std::strcmp(mode, "hold") == 0)
+                selection.timing.touch_mode = GC_TOUCH_HOLD_DRAG;
+            else {
+                std::cerr << "Invalid --touch-mode (expected tap, debounce, or hold).\n";
+                return 2;
+            }
         } else if (std::strcmp(argv[i], "--demo") == 0) {
             demo = true;
         } else if (std::strcmp(argv[i], "--launcher") == 0) {
@@ -103,34 +123,19 @@ int main(int argc, char **argv)
         }
     }
 
-    SdlSessionGuard sdl_session;
-    if (!sdl_session.active) {
-        std::cerr << "SDL_Init failed: " << SDL_GetError() << '\n';
-        return 1;
-    }
-
-    GcInputBindings bindings = gc_load_input_bindings();
-    if (open_launcher) {
-        GcLaunchSelection selection = saved;
-        if (!firmware_dir.empty()) selection.firmware_dir = firmware_dir;
-        if (!cartridge_path.empty()) selection.cartridge_path = cartridge_path;
-        if (cli_lcd_hz) selection.timing.lcd_hz = timing.lcd_hz;
-        if (cli_speed) selection.timing.cpu_speed_percent = timing.cpu_speed_percent;
-        if (!gc_sdl_launcher_run(selection, bindings)) return 0;
-        firmware_dir = std::move(selection.firmware_dir);
-        cartridge_path = std::move(selection.cartridge_path);
-        timing = selection.timing;
-        demo = false;
-    }
-    if (firmware_dir.empty() && !demo) {
-        std::cerr << "Choose --firmware DIR to boot the BIOS or open the launcher.\n";
-        print_usage(argv[0]);
-        return 2;
-    }
-    if (demo && (!firmware_dir.empty() || !cartridge_path.empty())) {
+    if (demo && (has_cli_firmware || has_cli_rom)) {
         std::cerr << "--demo is a standalone test; do not combine it with BIOS or cartridge boot.\n";
         return 2;
     }
+    if (!open_launcher && !demo && !has_cli_firmware) {
+        std::cerr << "Choose --firmware DIR to boot the BIOS directly or run without arguments for the launcher.\n";
+        print_usage(argv[0]);
+        return 2;
+    }
+
+    if (has_cli_firmware) selection.firmware_dir = cli_firmware;
+    if (has_cli_rom) selection.cartridge_path = cli_rom;
+    else if (!open_launcher) selection.cartridge_path.clear();
 
     auto machine = std::unique_ptr<GcMachine, decltype(&std::free)>(
         static_cast<GcMachine *>(std::calloc(1, sizeof(GcMachine))), &std::free);
@@ -139,42 +144,46 @@ int main(int argc, char **argv)
         return 1;
     }
     gc_machine_init(machine.get());
-    char error[192] = {};
-    if (!firmware_dir.empty()) {
-        const std::string internal_path = join_path(firmware_dir, "internal.bin");
-        const std::string external_path = join_path(firmware_dir, "external.bin");
-        if (!gc_load_firmware(machine.get(), internal_path.c_str(), external_path.c_str(),
-                              error, sizeof(error))) {
-            std::cerr << "Firmware load failed: " << error << '\n';
-            return 1;
+
+    if (!open_launcher) {
+        char error[192] = {};
+        if (!demo) {
+            const std::string internal_path = join_path(selection.firmware_dir, "internal.bin");
+            const std::string external_path = join_path(selection.firmware_dir, "external.bin");
+            if (!gc_load_firmware(machine.get(), internal_path.c_str(), external_path.c_str(),
+                                  error, sizeof(error))) {
+                std::cerr << "Firmware load failed: " << error << '\n';
+                return 1;
+            }
+            if (!selection.cartridge_path.empty() &&
+                !gc_load_cartridge(machine.get(), selection.cartridge_path.c_str(),
+                                   error, sizeof(error))) {
+                std::cerr << "Cartridge load failed: " << error << '\n';
+                return 1;
+            }
+        } else {
+            constexpr std::size_t capacity = (200u * 40u / 2u) * 8u + 1u;
+            std::vector<std::uint8_t> program(capacity);
+            const std::size_t length = gc_build_vram_demo(program.data(), program.size());
+            if (!length || length > GC_PATCH_SIZE - 0x1020u) {
+                std::cerr << "Could not build the VRAM demo program.\n";
+                return 1;
+            }
+            std::memcpy(machine->bus.patch + 0x1020u, program.data(), length);
+            std::memset(machine->bus.patch_valid + 0x1020u, 1, length);
+            machine->bus.reg_file[0x30] = static_cast<std::uint8_t>(
+                (machine->bus.reg_file[0x30] & 0x7Fu) | 0x80u);
         }
-    }
-    if (!cartridge_path.empty() &&
-        !gc_load_cartridge(machine.get(), cartridge_path.c_str(), error, sizeof(error))) {
-        std::cerr << "Cartridge load failed: " << error << '\n';
-        return 1;
-    }
-    if (demo) {
-        constexpr std::size_t capacity = (200u * 40u / 2u) * 8u + 1u;
-        std::vector<std::uint8_t> program(capacity);
-        const std::size_t length = gc_build_vram_demo(program.data(), program.size());
-        if (!length || length > GC_PATCH_SIZE - 0x1020u) {
-            std::cerr << "Could not build the VRAM demo program.\n";
-            return 1;
-        }
-        std::memcpy(machine->bus.patch + 0x1020u, program.data(), length);
-        std::memset(machine->bus.patch_valid + 0x1020u, 1, length);
-        machine->bus.reg_file[0x30] = static_cast<std::uint8_t>(
-            (machine->bus.reg_file[0x30] & 0x7Fu) | 0x80u);
+        gc_machine_reset(machine.get());
     }
 
-    gc_machine_reset(machine.get());
+    SdlSessionGuard sdl_session;
+    if (!sdl_session.active) {
+        std::cerr << "SDL_Init failed: " << SDL_GetError() << '\n';
+        return 1;
+    }
+
+    GcInputBindings bindings = gc_load_input_bindings();
     standalone::Sm8521Cpu cpu(*machine);
-    std::cout << "Starting standalone Game.com SDL LCD; BIOS: "
-              << (firmware_dir.empty() ? "not loaded" : firmware_dir)
-              << ", cartridge: " << (cartridge_path.empty() ? "none" : cartridge_path)
-              << ", LCD: " << timing.lcd_hz << " Hz"
-              << ", CPU: " << timing.cpu_speed_percent << "%"
-              << (demo ? ", VRAM demo enabled" : "") << '\n';
-    return gc_sdl_frontend_run(*machine, cpu, bindings, timing);
+    return gc_sdl_session_run(*machine, cpu, selection, bindings, open_launcher, demo);
 }
