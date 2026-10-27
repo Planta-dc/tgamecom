@@ -88,7 +88,7 @@ src/standalone/audio_synth.o tests/test_audio.o: src/standalone/audio_synth.hpp 
 src/standalone/serial_link.o tests/test_serial_link.o: src/standalone/serial_link.hpp src/standalone/sm8521_cpu.hpp src/standalone/sound_events.hpp include/gamecom.h
 tests/test_uart.o: src/standalone/sm8521_cpu.hpp src/standalone/sound_events.hpp
 src/standalone/boot_main.o: include/gamecom_video.h
-src/standalone/sm8521_cpu.o: src/standalone/sm85ops_mame.inc
+src/standalone/sm8521_cpu.o: src/standalone/sm8521_ops.inc
 src/standalone/demo_main.o src/sdl_main.o tests/test_standalone_cpu.o: include/gamecom_demo.h
 src/sdl_main.o src/sdl_frontend.o: include/gamecom_sdl.hpp src/standalone/sm8521_cpu.hpp
 src/sdl_frontend.o: include/gamecom_video.h src/standalone/audio_synth.hpp src/standalone/audio_output.hpp src/standalone/serial_link.hpp

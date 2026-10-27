@@ -50,10 +50,10 @@ typedef struct {
     bool cart2_present;
     bool cart_active;
     uint8_t active_slot;  /* 0 = none, 1 = slot 1 (P3=0x40), 2 = slot 2 (P3=0x80). */
-    uint8_t input_buttons[3]; /* Active-low MAME IN0/IN1/IN2 button groups. */
+    uint8_t input_buttons[3]; /* Active-low PIO key matrix groups (main row + power/D). */
     bool touch_active;
     bool touch_strobed;   /* Set when CPU selects/reads the active touch column. */
-    uint8_t touch_column; /* 0..12, per MAME's 13-column touch matrix. */
+    uint8_t touch_column; /* 0..12, active column across P2[7:0] and P1[7:2]. */
     uint8_t touch_row;    /* 0..9, active touch row within the selected column. */
     bool serial_cts;      /* P3[2] UART CTS input (active-low RS-232, idle high = true). */
     bool serial_dsr;      /* P3[3] UART DSR input (active-low RS-232, idle high = true). */
@@ -102,7 +102,7 @@ typedef enum {
     GC_BUTTON_A,
     GC_BUTTON_B,
     GC_BUTTON_C,
-    GC_BUTTON_POWER, /* MAME labels the corresponding key "Reset". */
+    GC_BUTTON_POWER,
     GC_BUTTON_D
 } GcButton;
 

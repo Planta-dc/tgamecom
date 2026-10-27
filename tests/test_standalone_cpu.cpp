@@ -254,6 +254,66 @@ static void test_indirect_addressing_and_ckc_stop()
     assert(gc_bus_read(machine, 0x0128) == 0x35u);
     assert(gc_bus_read(machine, 0x0129) == 0x09u);
 
+    /* Hardware SM8521 ALU & decode checks:
+       - URTS (0x2D) resets to 0x02 (TDRE=1)
+       - ADC / ADCW set V on signed overflow (+127 + 0 + C -> -128) and clear V on (-128 + 127 + C -> 0)
+       - DEC / DECW set V on -128 -> +127 (0x80 / 0x8000) and clear V on 0 -> -1 (0x00 / 0x0000)
+       - DM (0x2D / 0x3D) consumes 2 bytes (4 cycles)
+       - SWAP @Rr (0x1B subop 5) takes 7 cycles and swaps nibbles without touching flags */
+    gc_machine_init(machine);
+    load_patch(machine, 0x1020, {
+        0xC0, 0x7F,             /* MOV R0, #0x7F */
+        0xFC,                   /* SETC (C=1) */
+        0x53, 0x00, 0x00,       /* ADC R0, #0x00 -> 0x80, V=1, S=1, C=0 */
+        0xFC,                   /* SETC (C=1) */
+        0x53, 0x7F, 0x00,       /* ADC R0, #0x7F -> 0x00, V=0, Z=1, C=1 */
+        0x09, 0x00,             /* DEC R0 (0x00 -> 0xFF): V must be 0, S=1 */
+        0xC1, 0x80,             /* MOV R1, #0x80 */
+        0x09, 0x01,             /* DEC R1 (0x80 -> 0x7F): V must be 1, S=0 */
+        0x7A, 0x80, 0x00,       /* MOVW RR2, #0x8000 */
+        0x19, 0x02,             /* DECW RR2 (0x8000 -> 0x7FFF): V must be 1, S=0 */
+        0x7A, 0x00, 0x00,       /* MOVW RR2, #0x0000 */
+        0x19, 0x02,             /* DECW RR2 (0x0000 -> 0xFFFF): V must be 0, S=1 */
+        0x2D, 0xF1,             /* 2-byte DM NOP (operand 0xF1 must NOT halt!) */
+        0x3D, 0xF1,             /* 2-byte DM NOP (operand 0xF1 must NOT halt!) */
+        0x58, 0x3C, 0x80,       /* MOV 0x80, #0x3C */
+        0xC4, 0x80,             /* MOV R4, #0x80 */
+        0x1B, 0x25,             /* SWAP @R4 (desc=(4<<3)|5=0x25) -> 0xC3 in 7 cycles */
+        0xF1                    /* HALT */
+    });
+    cpu.reset();
+    assert(gc_bus_read(machine, 0x2Du) == 0x02u);
+    assert(cpu.step()); /* MOV R0, #0x7F */
+    assert(cpu.step()); /* SETC */
+    assert(cpu.step()); /* ADC R0, #0x00 -> 0x80, V=1 */
+    assert((gc_bus_read(machine, 0x1Fu) & 0x30u) == 0x30u); /* S=1, V=1 */
+    assert(cpu.step()); /* SETC */
+    assert(cpu.step()); /* ADC R0, #0x7F -> 0x00, V=0 */
+    assert((gc_bus_read(machine, 0x1Fu) & 0x50u) == 0x40u); /* Z=1, V=0 */
+    assert(cpu.step()); /* DEC R0 (0x00 -> 0xFF): V=0, S=1 */
+    assert((gc_bus_read(machine, 0x1Fu) & 0x30u) == 0x20u);
+    assert(cpu.step()); /* MOV R1, #0x80 */
+    assert(cpu.step()); /* DEC R1 (0x80 -> 0x7F): V=1, S=0 */
+    assert((gc_bus_read(machine, 0x1Fu) & 0x30u) == 0x10u);
+    assert(cpu.step()); /* MOVW RR2, #0x8000 */
+    assert(cpu.step()); /* DECW RR2 -> 0x7FFF, V=1 */
+    assert((gc_bus_read(machine, 0x1Fu) & 0x30u) == 0x10u);
+    assert(cpu.step()); /* MOVW RR2, #0x0000 */
+    assert(cpu.step()); /* DECW RR2 -> 0xFFFF, V=0, S=1 */
+    assert((gc_bus_read(machine, 0x1Fu) & 0x30u) == 0x20u);
+    assert(cpu.step()); /* DM 0xF1 (did NOT halt!) */
+    assert(!cpu.halted());
+    assert(cpu.step()); /* DM 0xF1 (did NOT halt!) */
+    assert(!cpu.halted());
+    assert(cpu.step()); /* MOV 0x80, #0x3C */
+    assert(cpu.step()); /* MOV R4, #0x80 */
+    const std::uint64_t before_swap = cpu.cycles();
+    assert(cpu.step()); /* SWAP @R4 -> 7 cycles */
+    assert(cpu.cycles() - before_swap == 7u);
+    assert(gc_bus_read(machine, 0x80u) == 0xC3u);
+    assert(!cpu.step()); /* HALT */
+    assert(cpu.halted());
+
     std::free(machine);
 }
 

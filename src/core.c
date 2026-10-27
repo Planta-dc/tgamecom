@@ -232,7 +232,7 @@ void gc_machine_reset(GcMachine *machine)
 {
     memset(&machine->cpu, 0, sizeof(machine->cpu));
     memset(machine->bus.reg_file, 0, sizeof(machine->bus.reg_file));
-    machine->bus.reg_file[0x14] = 0xFF; /* P0/P1 reset values from MAME reference. */
+    machine->bus.reg_file[0x14] = 0xFF; /* Hardware PIO pull-up reset defaults. */
     machine->bus.reg_file[0x15] = 0xFF;
     machine->bus.reg_file[0x16] = 0xFF;
     machine->bus.reg_file[0x17] = 0x00;
@@ -251,14 +251,14 @@ void gc_machine_reset(GcMachine *machine)
     machine->bus.serial_dsr = true;
     machine->bus.serial_dtr = true;
     machine->bus.serial_rts = true;
-    machine->bus.reg_file[0x30] = 0xB0; /* LCDC reset defaults from MAME reference. */
+    machine->bus.reg_file[0x30] = 0xB0; /* SM8521 LCDC reset defaults. */
     machine->bus.reg_file[0x31] = 0x07; /* LCH: default 200-dot timing. */
     machine->bus.reg_file[0x32] = 0x27; /* LCV: default visible/blank timing. */
     machine->bus.reg_file[RF_PS0] = 0;
-    machine->bus.reg_file[RF_PS1] = 0; /* I=0; other flags are undocumented at reset. */
+    machine->bus.reg_file[RF_PS1] = 0; /* I=0 at reset. */
     machine->bus.reg_file[RF_SYS] = 0;
-    machine->bus.reg_file[0x2B] = 0xFF; /* UART timer/reset defaults from MAME. */
-    machine->bus.reg_file[0x2D] = 0x42;
+    machine->bus.reg_file[0x2B] = 0xFF; /* SM8521 URTT/URTS/WDTC reset defaults. */
+    machine->bus.reg_file[0x2D] = 0x02; /* TDRE=1 (bit 1) at reset. */
     machine->bus.reg_file[0x5F] = 0x38;
     machine->bus.boot_enabled = true;
     machine->bus.cart_active = false;
@@ -354,13 +354,6 @@ static uint8_t fetch8(GcMachine *m)
     uint8_t value = gc_bus_read(m, m->cpu.pc);
     m->cpu.pc++;
     return value;
-}
-
-static uint16_t fetch16le(GcMachine *m)
-{
-    uint8_t lo = fetch8(m);
-    uint8_t hi = fetch8(m);
-    return (uint16_t)(lo | ((uint16_t)hi << 8));
 }
 
 static uint16_t fetch16be(GcMachine *m)
@@ -482,8 +475,9 @@ GcStepResult gc_cpu_step(GcMachine *machine)
         a = fetch8(machine); old = gc_bus_read(machine, a); result8 = (uint8_t)(old - 1u);
         flags_incdec8(machine, old, result8, true); gc_bus_write(machine, a, result8); spent = 4;
         break;
-    case 0x2D: /* MAME fallback for undocumented DM opcode. */
+    case 0x2D: /* SM8521 2-byte DM NOP instruction. */
     case 0x3D:
+        (void)fetch8(machine);
         spent = 4;
         break;
     case 0x3B: { /* MOVW @address,RR ; word store to VRAM or another memory area */
@@ -567,8 +561,8 @@ GcStepResult gc_cpu_step(GcMachine *machine)
         gc_cpu_reg_write(machine, (unsigned)a + 1u, (uint8_t)target);
         spent = 9;
         break;
-    case 0x49: /* CALL absolute */
-        target = fetch16le(machine);
+    case 0x49: /* CALL absolute (big-endian target) */
+        target = fetch16be(machine);
         push8(machine, (uint8_t)machine->cpu.pc);
         push8(machine, (uint8_t)(machine->cpu.pc >> 8));
         machine->cpu.pc = target; spent = ((machine->bus.reg_file[RF_SYS] & SYS_SP16) != 0) ? 12u : 10u;
@@ -596,7 +590,7 @@ GcStepResult gc_cpu_step(GcMachine *machine)
         break;
     case 0xF0: machine->cpu.stopped = true; spent = 2; break;
     case 0xF1: machine->cpu.halted = true; spent = 2; break;
-    case 0xF8: { /* RET; stack byte order follows the MAME reference core. */
+    case 0xF8: { /* RET (big-endian PC pop: high byte at SP, low byte at SP+1). */
         uint8_t hi = pop8(machine); uint8_t lo = pop8(machine);
         machine->cpu.pc = (uint16_t)(((uint16_t)hi << 8) | lo);
         spent = ((machine->bus.reg_file[RF_SYS] & SYS_SP16) != 0) ? 10u : 8u;
@@ -755,9 +749,6 @@ void gc_unload_cartridge_slot(GcMachine *machine, unsigned slot)
 bool gc_load_cartridge_slot(GcMachine *machine, unsigned slot, const char *path,
                             char *error, size_t error_size)
 {
-    static const size_t supported_sizes[] = {
-        0x008000u, 0x040000u, 0x080000u, 0x100000u, 0x1C0000u, 0x200000u
-    };
     if (!machine || (slot != 1u && slot != 2u)) {
         set_error(error, error_size, "invalid cartridge slot (expected 1 or 2)");
         return false;
@@ -775,27 +766,44 @@ bool gc_load_cartridge_slot(GcMachine *machine, unsigned slot, const char *path,
     const bool io_error = ferror(f) != 0;
     fclose(f);
     if (io_error || extra != EOF) {
+        memset(rom_buf, 0xFF, GC_ROM_SIZE);
         set_error(error, error_size, "cartridge image exceeds 2 MiB or could not be read");
         return false;
     }
-    bool supported = false;
-    for (size_t i = 0; i < sizeof(supported_sizes) / sizeof(supported_sizes[0]); ++i)
-        supported |= (n == supported_sizes[i]);
-    if (!supported) {
+    if (n >= 4u && rom_buf[0] == 'P' && rom_buf[1] == 'K' &&
+        (rom_buf[2] == 0x03u || rom_buf[2] == 0x05u)) {
+        memset(rom_buf, 0xFF, GC_ROM_SIZE);
         set_error(error, error_size,
-                  "unsupported raw cartridge size; expected 32 KiB, 256/512 KiB, 1/1.75/2 MiB (not a ZIP)");
+                  "ZIP archives cannot be loaded directly; extract the .bin/.tgc ROM first");
+        return false;
+    }
+    if (n < 0x1000u) {
+        memset(rom_buf, 0xFF, GC_ROM_SIZE);
+        set_error(error, error_size, "cartridge image is too small (expected 4 KiB..2 MiB raw ROM)");
         return false;
     }
 
-    if (n == 0x1C0000u) {
+    /* Split retail dumps (0x0C0000 = 768 KiB or 0x1C0000 = 1.75 MiB) omit the
+       lower 256 KiB mirror so bank 0x20 ("TigerDMGC") starts at file offset 0.
+       Place those at +0x40000 and mirror across the 2 MiB cartridge window;
+       otherwise mirror raw ROM images via the hardware address-bit OR mask. */
+    const bool header_at_0 = (n >= 0x10u) && (memcmp(rom_buf + 5u, "TigerDMGC", 9u) == 0);
+    const bool header_at_40k = (n >= 0x40010u) && (memcmp(rom_buf + 0x40005u, "TigerDMGC", 9u) == 0);
+    if (n == 0x1C0000u || (n > 0x100000u && n <= 0x1C0000u && header_at_0 && !header_at_40k)) {
         memmove(rom_buf + 0x40000u, rom_buf, n);
+        memcpy(rom_buf, rom_buf + 0x40000u, 0x40000u);
+    } else if (n == 0x0C0000u || (n > 0x080000u && n <= 0x0C0000u && header_at_0 && !header_at_40k)) {
+        memmove(rom_buf + 0x40000u, rom_buf, n);
+        memcpy(rom_buf, rom_buf + 0x40000u, 0x40000u);
+        memcpy(rom_buf + 0x100000u, rom_buf, 0x100000u);
     } else {
-        if (n < 0x010000u) memcpy(rom_buf + 0x008000u, rom_buf, 0x008000u);
-        if (n < 0x020000u) memcpy(rom_buf + 0x010000u, rom_buf, 0x010000u);
-        if (n < 0x040000u) memcpy(rom_buf + 0x020000u, rom_buf, 0x020000u);
-        if (n < 0x080000u) memcpy(rom_buf + 0x040000u, rom_buf, 0x040000u);
-        if (n < 0x100000u) memcpy(rom_buf + 0x080000u, rom_buf, 0x080000u);
-        if (n < 0x1C0000u) memcpy(rom_buf + 0x100000u, rom_buf, 0x100000u);
+        size_t mask = 0u;
+        for (size_t bit = 1u; bit < n; bit <<= 1u)
+            mask |= bit;
+        if (mask == 0u) mask = 0xFFFu;
+        const size_t span = mask + 1u;
+        for (size_t addr = span; addr < GC_ROM_SIZE; ++addr)
+            rom_buf[addr] = rom_buf[addr & mask];
     }
     *present_flag = true;
     update_p3_state(machine);
@@ -831,15 +839,15 @@ void gc_synthesize_boot_rom(GcMachine *machine)
        2. Reset entry (0x1020) initializes core SFRs/SP, maps external BIOS
           banks (MMU1=2, MMU2=4, MMU4=3), and branches to external BIOS 0x2054. */
     static const struct { uint8_t vec_offset; uint16_t ext_target; } k_vectors[9] = {
-        { 0x02u, 0x2039u }, /* DMA */
-        { 0x06u, 0x203Cu }, /* TIM0 */
-        { 0x08u, 0x203Fu }, /* EXT */
+        { 0x02u, 0x2039u }, /* TIM0 */
+        { 0x06u, 0x203Cu }, /* EXT */
+        { 0x08u, 0x203Fu }, /* UART */
         { 0x0Eu, 0x2042u }, /* LCDC */
         { 0x12u, 0x2045u }, /* TIM1 */
-        { 0x16u, 0x2048u }, /* UART */
+        { 0x16u, 0x2048u }, /* CLKT */
         { 0x1Au, 0x204Bu }, /* PIO */
         { 0x1Cu, 0x204Eu }, /* WDT */
-        { 0x1Eu, 0x2051u }  /* NMI / CLKT */
+        { 0x1Eu, 0x2051u }  /* NMI / SWI */
     };
     const uint16_t iret_stub = 0x10A0u;
     for (unsigned off = 0; off < 0x20u; off += 2u) {
