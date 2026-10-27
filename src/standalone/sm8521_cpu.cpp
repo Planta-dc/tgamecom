@@ -16,6 +16,8 @@ static constexpr uint64_t GAMECOM_FRAME_CYCLES = 92573;
 
 Sm8521Cpu::Sm8521Cpu(GcMachine& machine) : m_machine(machine)
 {
+    m_sound_writes.reserve(128);
+    m_uart_transmits.reserve(64);
     reset();
 }
 
@@ -41,23 +43,148 @@ void Sm8521Cpu::reset()
     m_dma_transfers = 0;
     m_clock_ticks = 0;
     m_vblank_ticks = 0;
+    m_uart_tx_data = 0xFF;
+    m_uart_rx_data = 0;
+    m_uart_status = 0x42; /* Preserve the existing MAME-reference reset value. */
+    m_uart_control = 0;
+    m_uart_tx_pending = false;
+    m_uart_tx_active = false;
+    m_uart_tx_shift = 0xFF;
+    m_uart_tx_complete_cycle = 0;
+    m_uart_rx_active = false;
+    m_uart_rx_shift = 0;
+    m_uart_rx_complete_cycle = 0;
+    m_uart_rx_queue.clear();
+    m_uart_transmits.clear();
+    m_sound_writes.clear();
+    m_machine.bus.reg_file[0x2B] = m_uart_tx_data;
+    m_machine.bus.reg_file[0x2C] = m_uart_rx_data;
+    m_machine.bus.reg_file[0x2D] = m_uart_status;
+    m_machine.bus.reg_file[0x2E] = m_uart_control;
     for (auto& byte : m_register_ram) byte = 0;
     get_sp();
 }
 
-uint8_t Sm8521Cpu::mem_readbyte(uint32_t address) const
+bool Sm8521Cpu::queue_uart_receive(uint8_t value)
+{
+    if ((m_uart_control & 0x08u) == 0 || m_uart_rx_queue.size() >= 4096u)
+        return false;
+    m_uart_rx_queue.push_back(value);
+    return true;
+}
+
+uint64_t Sm8521Cpu::uart_frame_cycles() const noexcept
+{
+    if (!m_timers[0].enabled) return 0;
+    const uint64_t timer_period = static_cast<uint64_t>(m_timers[0].prescale_max) *
+                                  (m_timers[0].upcounter_max ? m_timers[0].upcounter_max : 1u);
+    const uint64_t bit_cycles = timer_period * 32u;
+    const unsigned parity_bits = (m_uart_control & 0x04u) ? 0u : 1u;
+    const unsigned stop_bits = (m_uart_control & 0x01u) ? 2u : 1u;
+    return bit_cycles * (1u + 8u + parity_bits + stop_bits);
+}
+
+void Sm8521Cpu::start_uart_tx()
+{
+    const uint64_t frame_cycles = uart_frame_cycles();
+    if (!m_uart_tx_pending || m_uart_tx_active || (m_uart_control & 0x10u) == 0 || frame_cycles == 0)
+        return;
+    m_uart_tx_shift = m_uart_tx_data;
+    m_uart_tx_pending = false;
+    m_uart_tx_active = true;
+    m_uart_tx_complete_cycle = m_cycles + frame_cycles;
+}
+
+void Sm8521Cpu::uart_write_data(uint8_t value)
+{
+    m_uart_tx_data = value;
+    m_uart_tx_pending = true;
+    m_uart_status &= static_cast<uint8_t>(~0x02u); /* TDRE clears on a data write. */
+    start_uart_tx();
+}
+
+void Sm8521Cpu::uart_write_control(uint8_t value)
+{
+    m_uart_control = value & 0x1Fu;
+    if ((m_uart_control & 0x10u) == 0) {
+        m_uart_tx_active = false;
+        m_uart_tx_pending = false;
+        m_uart_status |= 0x02u;
+    } else {
+        start_uart_tx();
+    }
+    if ((m_uart_control & 0x08u) == 0) {
+        m_uart_rx_active = false;
+        m_uart_rx_queue.clear();
+        m_uart_status &= static_cast<uint8_t>(~0x20u); /* RBSY */
+    }
+}
+
+uint8_t Sm8521Cpu::uart_read_register(uint8_t address)
+{
+    uint8_t value = 0xFF;
+    switch (address) {
+    case 0x2B: value = 0xFF; break; /* URTT is write-only. */
+    case 0x2C:
+        value = m_uart_rx_data;
+        m_uart_status &= static_cast<uint8_t>(~0x01u); /* RDRF clears on read. */
+        break;
+    case 0x2D:
+        value = m_uart_status;
+        m_uart_status &= static_cast<uint8_t>(~0x1Cu); /* OR, FE, PE clear on status read. */
+        break;
+    case 0x2E: value = m_uart_control; break;
+    default: break;
+    }
+    m_machine.bus.reg_file[0x2B] = m_uart_tx_data;
+    m_machine.bus.reg_file[0x2C] = m_uart_rx_data;
+    m_machine.bus.reg_file[0x2D] = m_uart_status;
+    m_machine.bus.reg_file[0x2E] = m_uart_control;
+    return value;
+}
+
+uint8_t Sm8521Cpu::mem_readbyte(uint32_t address)
 {
     address &= 0xFFFFu;
-    if (address < 0x10u)
-        return m_register_ram[address + (m_PS0 & 0xF8u)];
+    if (address < 0x10u) {
+        const uint32_t effective = address + (m_PS0 & 0xF8u);
+        if (effective >= 0x2Bu && effective <= 0x2Eu)
+            return uart_read_register(static_cast<uint8_t>(effective));
+        return m_register_ram[effective];
+    }
+    if (address >= 0x2Bu && address <= 0x2Eu)
+        return uart_read_register(static_cast<uint8_t>(address));
     return gc_bus_read(&m_machine, static_cast<uint16_t>(address));
 }
 
 void Sm8521Cpu::mem_writebyte(uint32_t address, uint8_t value)
 {
     address &= 0xFFFFu;
+    const uint32_t effective = address < 0x10u ? address + (m_PS0 & 0xF8u) : address;
+    if (effective >= 0x40u && effective < 0x80u)
+        m_sound_writes.push_back({m_cycles, static_cast<uint8_t>(effective), value});
     if (address < 0x10u)
-        m_register_ram[address + (m_PS0 & 0xF8u)] = value;
+        m_register_ram[effective] = value;
+
+    if (effective >= 0x2Bu && effective <= 0x2Eu) {
+        if (address < 0x10u)
+            gc_bus_write(&m_machine, static_cast<uint16_t>(address), value);
+        if (effective == 0x2Bu) uart_write_data(value);
+        else if (effective == 0x2Eu) uart_write_control(value);
+        gc_bus_write(&m_machine, static_cast<uint16_t>(effective), value);
+        m_machine.bus.reg_file[0x2B] = m_uart_tx_data;
+        m_machine.bus.reg_file[0x2C] = m_uart_rx_data;
+        m_machine.bus.reg_file[0x2D] = m_uart_status;
+        m_machine.bus.reg_file[0x2E] = m_uart_control;
+        return;
+    }
+
+    if (address < 0x10u && effective >= 0x40u && effective < 0x80u) {
+        gc_bus_write(&m_machine, static_cast<uint16_t>(address), value);
+        gc_bus_write(&m_machine, static_cast<uint16_t>(effective), value);
+        return;
+    }
+
     gc_bus_write(&m_machine, static_cast<uint16_t>(address), value);
 
     switch (address) {
@@ -96,7 +223,7 @@ void Sm8521Cpu::mem_writebyte(uint32_t address, uint8_t value)
     }
 }
 
-uint16_t Sm8521Cpu::mem_readword(uint32_t address) const
+uint16_t Sm8521Cpu::mem_readword(uint32_t address)
 {
     return static_cast<uint16_t>((static_cast<uint16_t>(mem_readbyte(address)) << 8) |
                                   mem_readbyte(address + 1u));
@@ -346,6 +473,55 @@ void Sm8521Cpu::perform_dma()
     request_interrupt(1); /* DMA completion wakes HALT even if not mask-enabled. */
 }
 
+void Sm8521Cpu::advance_uart()
+{
+    const uint64_t frame_cycles = uart_frame_cycles();
+    if (frame_cycles == 0) return;
+
+    start_uart_tx();
+    if (m_uart_tx_active && m_cycles >= m_uart_tx_complete_cycle) {
+        m_uart_transmits.push_back({m_uart_tx_complete_cycle, m_uart_tx_shift});
+        m_uart_tx_active = false;
+        request_interrupt(4);
+        if (m_uart_tx_pending) {
+            start_uart_tx();
+        } else {
+            m_uart_status |= 0x02u; /* TDRE */
+        }
+    }
+
+    if (!m_uart_rx_active && (m_uart_control & 0x08u) && !m_uart_rx_queue.empty()) {
+        m_uart_rx_shift = m_uart_rx_queue.front();
+        m_uart_rx_queue.pop_front();
+        m_uart_rx_active = true;
+        m_uart_rx_complete_cycle = m_cycles + frame_cycles;
+        m_uart_status |= 0x20u; /* RBSY */
+    }
+    if (m_uart_rx_active && m_cycles >= m_uart_rx_complete_cycle) {
+        m_uart_rx_active = false;
+        m_uart_status &= static_cast<uint8_t>(~0x20u); /* RBSY */
+        if (m_uart_status & 0x01u) {
+            m_uart_status |= 0x10u; /* OR: unread receive data was overwritten by a new frame. */
+        } else {
+            m_uart_rx_data = m_uart_rx_shift;
+            m_uart_status |= 0x01u; /* RDRF */
+        }
+        request_interrupt(4);
+        if ((m_uart_control & 0x08u) && !m_uart_rx_queue.empty()) {
+            m_uart_rx_shift = m_uart_rx_queue.front();
+            m_uart_rx_queue.pop_front();
+            m_uart_rx_active = true;
+            m_uart_rx_complete_cycle = m_cycles + frame_cycles;
+            m_uart_status |= 0x20u;
+        }
+    }
+
+    m_machine.bus.reg_file[0x2B] = m_uart_tx_data;
+    m_machine.bus.reg_file[0x2C] = m_uart_rx_data;
+    m_machine.bus.reg_file[0x2D] = m_uart_status;
+    m_machine.bus.reg_file[0x2E] = m_uart_control;
+}
+
 void Sm8521Cpu::advance_devices(unsigned cycles)
 {
     for (unsigned timer = 0; timer < 2; ++timer) {
@@ -379,6 +555,7 @@ void Sm8521Cpu::advance_devices(unsigned cycles)
         ++m_clock_ticks;
         m_next_clock_tick += m_clock_tick_period;
     }
+    advance_uart();
 }
 
 bool Sm8521Cpu::step()

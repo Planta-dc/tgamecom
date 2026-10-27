@@ -13,22 +13,26 @@
 namespace {
 constexpr unsigned frame_cycles = 92573u; /* MAME default LCD frame, ~59.732 Hz. */
 
-void update_key(GcMachine& machine, SDL_Keycode key, bool down)
+void update_key(GcMachine& machine, const GcInputBindings& bindings,
+               SDL_Keycode key, bool down)
 {
-    switch (key) {
-    case SDLK_UP:    gc_input_set_button(&machine, GC_BUTTON_UP, down); break;
-    case SDLK_DOWN:  gc_input_set_button(&machine, GC_BUTTON_DOWN, down); break;
-    case SDLK_LEFT:  gc_input_set_button(&machine, GC_BUTTON_LEFT, down); break;
-    case SDLK_RIGHT: gc_input_set_button(&machine, GC_BUTTON_RIGHT, down); break;
-    case SDLK_m:     gc_input_set_button(&machine, GC_BUTTON_MENU, down); break;
-    case SDLK_p:     gc_input_set_button(&machine, GC_BUTTON_PAUSE, down); break;
-    case SDLK_s:     gc_input_set_button(&machine, GC_BUTTON_SOUND, down); break;
-    case SDLK_a:     gc_input_set_button(&machine, GC_BUTTON_A, down); break;
-    case SDLK_b:     gc_input_set_button(&machine, GC_BUTTON_B, down); break;
-    case SDLK_c:     gc_input_set_button(&machine, GC_BUTTON_C, down); break;
-    case SDLK_d:     gc_input_set_button(&machine, GC_BUTTON_D, down); break;
-    case SDLK_n:     gc_input_set_button(&machine, GC_BUTTON_POWER, down); break;
-    default: break;
+    for (unsigned action = 0; action < GC_CONTROL_COUNT; ++action) {
+        if (bindings.keycodes[action] != static_cast<int>(key)) continue;
+        switch (action) {
+        case GC_CONTROL_UP:    gc_input_set_button(&machine, GC_BUTTON_UP, down); break;
+        case GC_CONTROL_DOWN:  gc_input_set_button(&machine, GC_BUTTON_DOWN, down); break;
+        case GC_CONTROL_LEFT:  gc_input_set_button(&machine, GC_BUTTON_LEFT, down); break;
+        case GC_CONTROL_RIGHT: gc_input_set_button(&machine, GC_BUTTON_RIGHT, down); break;
+        case GC_CONTROL_A:     gc_input_set_button(&machine, GC_BUTTON_A, down); break;
+        case GC_CONTROL_B:     gc_input_set_button(&machine, GC_BUTTON_B, down); break;
+        case GC_CONTROL_C:     gc_input_set_button(&machine, GC_BUTTON_C, down); break;
+        case GC_CONTROL_D:     gc_input_set_button(&machine, GC_BUTTON_D, down); break;
+        case GC_CONTROL_MENU:  gc_input_set_button(&machine, GC_BUTTON_MENU, down); break;
+        case GC_CONTROL_PAUSE: gc_input_set_button(&machine, GC_BUTTON_PAUSE, down); break;
+        case GC_CONTROL_SOUND: gc_input_set_button(&machine, GC_BUTTON_SOUND, down); break;
+        case GC_CONTROL_POWER: gc_input_set_button(&machine, GC_BUTTON_POWER, down); break;
+        default: break;
+        }
     }
 }
 
@@ -87,7 +91,8 @@ void render_centered(SDL_Renderer *renderer, SDL_Texture *texture)
 }
 }
 
-int gc_sdl_frontend_run(GcMachine& machine, standalone::Sm8521Cpu& cpu)
+int gc_sdl_frontend_run(GcMachine& machine, standalone::Sm8521Cpu& cpu,
+                        const GcInputBindings& bindings)
 {
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) != 0) {
         std::fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
@@ -103,8 +108,10 @@ int gc_sdl_frontend_run(GcMachine& machine, standalone::Sm8521Cpu& cpu)
         SDL_Quit();
         return 1;
     }
-    SDL_Renderer *renderer = SDL_CreateRenderer(window, -1,
-        SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+    /* Do not tie emulated time to the monitor refresh rate: a 120/144 Hz
+     * display would otherwise run the Game.com CPU that many times per second.
+     * The explicit frame deadline below is the authoritative 59.732 Hz cap. */
+    SDL_Renderer *renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
     if (!renderer) renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_SOFTWARE);
     if (!renderer) {
         std::fprintf(stderr, "SDL_CreateRenderer failed: %s\n", SDL_GetError());
@@ -125,10 +132,6 @@ int gc_sdl_frontend_run(GcMachine& machine, standalone::Sm8521Cpu& cpu)
 
     std::array<std::uint32_t, GC_LCD_WIDTH * GC_LCD_HEIGHT> pixels{};
     bool done = false;
-    bool renderer_vsync = false;
-    SDL_RendererInfo renderer_info{};
-    if (SDL_GetRendererInfo(renderer, &renderer_info) == 0)
-        renderer_vsync = (renderer_info.flags & SDL_RENDERER_PRESENTVSYNC) != 0;
 
     const std::uint64_t counter_frequency = SDL_GetPerformanceFrequency();
     const std::uint64_t frame_ticks = static_cast<std::uint64_t>(
@@ -155,7 +158,7 @@ int gc_sdl_frontend_run(GcMachine& machine, standalone::Sm8521Cpu& cpu)
             else if (event.type == SDL_KEYDOWN || event.type == SDL_KEYUP) {
                 const bool pressed = event.type == SDL_KEYDOWN;
                 if (event.key.keysym.sym == SDLK_ESCAPE && pressed) done = true;
-                else update_key(machine, event.key.keysym.sym, pressed);
+                else update_key(machine, bindings, event.key.keysym.sym, pressed);
             } else if (event.type == SDL_MOUSEBUTTONDOWN || event.type == SDL_MOUSEBUTTONUP) {
                 if (event.button.button == SDL_BUTTON_LEFT)
                     update_touch_from_mouse(machine, window, renderer,
@@ -169,15 +172,20 @@ int gc_sdl_frontend_run(GcMachine& machine, standalone::Sm8521Cpu& cpu)
         }
         if (done) break;
 
-        const std::uint64_t frame_end = cpu.cycles() + frame_cycles;
+        const std::uint64_t frame_start = cpu.cycles();
+        const std::uint64_t frame_end = frame_start + frame_cycles;
         while (cpu.cycles() < frame_end) (void)cpu.step();
+        const std::uint64_t frame_stop = cpu.cycles();
+        const std::uint64_t elapsed_cycles = frame_stop - frame_start;
 
         audio_cycle_remainder +=
-            static_cast<std::uint64_t>(frame_cycles) * standalone::AudioOutput::sample_rate;
+            elapsed_cycles * standalone::AudioOutput::sample_rate;
         const std::size_t audio_frames = static_cast<std::size_t>(audio_cycle_remainder / GC_CPU_HZ);
         audio_cycle_remainder %= GC_CPU_HZ;
-        sound.render(machine, audio_samples.data(), audio_frames,
+        sound.render(cpu.sound_writes(), frame_start, frame_stop,
+                     audio_samples.data(), audio_frames,
                      standalone::AudioOutput::sample_rate);
+        cpu.clear_sound_writes();
         audio_output.push(audio_samples.data(), audio_frames);
 
         if (!gc_lcd_render_argb(&machine, pixels.data(), GC_LCD_WIDTH)) {
@@ -193,16 +201,21 @@ int gc_sdl_frontend_run(GcMachine& machine, standalone::Sm8521Cpu& cpu)
         }
         render_centered(renderer, texture);
 
-        if (!renderer_vsync) {
-            next_deadline += frame_ticks;
-            const std::uint64_t now = SDL_GetPerformanceCounter();
-            if (next_deadline > now) {
-                const std::uint64_t wait_ms = (next_deadline - now) * 1000u /
-                                              (counter_frequency ? counter_frequency : 1u);
-                if (wait_ms) SDL_Delay(static_cast<std::uint32_t>(wait_ms));
-            } else {
-                next_deadline = now;
-            }
+        next_deadline += frame_ticks;
+        std::uint64_t now = SDL_GetPerformanceCounter();
+        if (next_deadline > now) {
+            /* SDL_Delay is millisecond-granular. Sleep most of the remaining
+             * interval, then wait the final sub-millisecond against the high-
+             * resolution counter so gameplay stays close to the 59.732 Hz LCD. */
+            const std::uint64_t remaining = next_deadline - now;
+            const std::uint64_t wait_ms = remaining * 1000u /
+                                          (counter_frequency ? counter_frequency : 1u);
+            if (wait_ms > 1u) SDL_Delay(static_cast<std::uint32_t>(wait_ms - 1u));
+            while ((now = SDL_GetPerformanceCounter()) < next_deadline) { }
+        } else {
+            /* If a frame overruns, don't try to catch up by running future
+             * frames without pacing. Resume from the current wall-clock time. */
+            next_deadline = now;
         }
         if (++frame_number % 300u == 0u) {
             char title[128];

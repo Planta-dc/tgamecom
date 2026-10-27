@@ -25,7 +25,8 @@ static void print_usage(const char *program)
     std::cout << "Usage: " << program << " [--launcher] [--firmware DIR] [--rom RAW-CARTRIDGE.bin] [--demo]\n"
                  "With no options, opens the interactive launcher.\n"
                  "Firmware DIR must contain internal.bin and external.bin.\n"
-                 "Controls: arrows, A/B/C/D, M=menu, P=pause, S=sound, N=reset, mouse=touch, Esc=quit\n";
+                 "Default controls: arrows, A/B/C/D, M=menu, P=pause, S=sound, N=power; mouse=touch, Esc=quit\n"
+                 "Keyboard bindings can be changed in the launcher.\n";
 }
 
 int main(int argc, char **argv)
@@ -47,9 +48,10 @@ int main(int argc, char **argv)
             return 2;
         }
     }
+    GcInputBindings bindings = gc_load_input_bindings();
     if (open_launcher) {
         GcLaunchSelection selection;
-        if (!gc_sdl_launcher_run(selection)) return 0;
+        if (!gc_sdl_launcher_run(selection, bindings)) return 0;
         firmware_dir = std::move(selection.firmware_dir);
         cartridge_path = std::move(selection.cartridge_path);
         demo = false;
@@ -106,5 +108,5 @@ int main(int argc, char **argv)
               << (firmware_dir.empty() ? "not loaded" : firmware_dir)
               << ", cartridge: " << (cartridge_path.empty() ? "none" : cartridge_path)
               << (demo ? ", VRAM demo enabled" : "") << '\n';
-    return gc_sdl_frontend_run(*machine, cpu);
+    return gc_sdl_frontend_run(*machine, cpu, bindings);
 }

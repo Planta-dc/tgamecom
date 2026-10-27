@@ -22,11 +22,16 @@ AUDIO_SYNTH_OBJ = src/standalone/audio_synth.o
 ifeq ($(HOST_OS),Linux)
 MINIAUDIO_LDLIBS = -ldl -lpthread -lm
 SDL_PORTABLE_LDFLAGS ?= -static-libstdc++ -static-libgcc
+GTK3_AVAILABLE := $(shell pkg-config --exists gtk+-3.0 && echo 1)
+ifeq ($(GTK3_AVAILABLE),1)
+GTK3_CFLAGS := $(shell pkg-config --cflags gtk+-3.0)
+GTK3_LDLIBS := $(shell pkg-config --libs gtk+-3.0)
+endif
 else ifeq ($(HOST_OS),Darwin)
 MINIAUDIO_LDLIBS = -lpthread -lm -framework CoreAudio -framework AudioToolbox -framework CoreFoundation
 endif
 
-.PHONY: all test test-audio clean sdl
+.PHONY: all test test-audio test-uart clean sdl
 all: gamecom-debug gamecom-demo gamecom-standalone-demo gamecom-boot
 
 gamecom-debug: $(CORE_OBJ) src/monitor.o
@@ -53,17 +58,22 @@ gamecom-test-video: $(CORE_OBJ) tests/test_video.o
 test-audio: $(CORE_OBJ) $(AUDIO_SYNTH_OBJ) tests/test_audio.o
 	$(CXX) $(CXXFLAGS) $(CXX_WARNINGS) $(PORTABLE_LDFLAGS) -o $@ $^
 
-test: test-core gamecom-test-standalone gamecom-test-video test-audio
+test-uart: $(CORE_OBJ) $(STANDALONE_CPU_OBJ) tests/test_uart.o
+	$(CXX) $(CXXFLAGS) $(CXX_WARNINGS) $(PORTABLE_LDFLAGS) -o $@ $^
+
+test: test-core gamecom-test-standalone gamecom-test-video test-audio test-uart
 	./test-core
 	./gamecom-test-standalone
 	./gamecom-test-video
 	./test-audio
+	./test-uart
 
 src/homebrew_demo.o src/demo_main.o: include/gamecom_demo.h
 src/demo_main.o src/video.o: include/gamecom_video.h
 src/homebrew_demo.o: include/gamecom.h
-src/standalone/sm8521_cpu.o src/standalone/demo_main.o src/standalone/boot_main.o: src/standalone/sm8521_cpu.hpp include/gamecom.h
-src/standalone/audio_synth.o tests/test_audio.o: src/standalone/audio_synth.hpp include/gamecom.h
+src/standalone/sm8521_cpu.o src/standalone/demo_main.o src/standalone/boot_main.o: src/standalone/sm8521_cpu.hpp src/standalone/sound_events.hpp include/gamecom.h
+src/standalone/audio_synth.o tests/test_audio.o: src/standalone/audio_synth.hpp src/standalone/sound_events.hpp include/gamecom.h
+tests/test_uart.o: src/standalone/sm8521_cpu.hpp src/standalone/sound_events.hpp
 src/standalone/boot_main.o: include/gamecom_video.h
 src/standalone/sm8521_cpu.o: src/standalone/sm85ops_mame.inc
 src/standalone/demo_main.o src/sdl_main.o tests/test_standalone_cpu.o: include/gamecom_demo.h
@@ -84,9 +94,12 @@ tests/test_video.o: include/gamecom_video.h
 ifeq ($(SDL_AVAILABLE),1)
 SDL_OBJECTS = src/sdl_main.o src/sdl_frontend.o src/sdl_launcher.o src/audio_output.o $(AUDIO_SYNTH_OBJ)
 src/sdl_main.o src/sdl_frontend.o src/sdl_launcher.o: CPPFLAGS += $(shell pkg-config --cflags sdl2)
-src/sdl_main.o: include/gamecom_launcher.hpp
+ifeq ($(GTK3_AVAILABLE),1)
+src/sdl_launcher.o: CPPFLAGS += $(GTK3_CFLAGS) -DGAMECOM_HAVE_GTK3=1
+endif
+src/sdl_main.o src/sdl_frontend.o: include/gamecom_launcher.hpp
 gamecom-sdl: $(CORE_OBJ) $(DEMO_OBJ) $(STANDALONE_CPU_OBJ) $(SDL_OBJECTS)
-	$(CXX) $(CXXFLAGS) $(CXX_WARNINGS) $(SDL_PORTABLE_LDFLAGS) -o $@ $^ $(shell pkg-config --libs sdl2) $(MINIAUDIO_LDLIBS)
+	$(CXX) $(CXXFLAGS) $(CXX_WARNINGS) $(SDL_PORTABLE_LDFLAGS) -o $@ $^ $(shell pkg-config --libs sdl2) $(GTK3_LDLIBS) $(MINIAUDIO_LDLIBS)
 endif
 
 sdl:
@@ -97,5 +110,5 @@ sdl:
 clean:
 	rm -f $(CORE_OBJ) $(DEMO_OBJ) $(STANDALONE_CPU_OBJ) $(AUDIO_SYNTH_OBJ) src/audio_output.o src/monitor.o src/demo_main.o \
 	  src/standalone/demo_main.o src/standalone/boot_main.o src/sdl_main.o src/sdl_frontend.o src/sdl_launcher.o \
-	  tests/test_core.o tests/test_standalone_cpu.o tests/test_video.o tests/test_audio.o \
-	  gamecom-debug gamecom-demo gamecom-standalone-demo gamecom-boot test-core gamecom-test-standalone gamecom-test-video test-audio gamecom-sdl
+	  tests/test_core.o tests/test_standalone_cpu.o tests/test_video.o tests/test_audio.o tests/test_uart.o \
+	  gamecom-debug gamecom-demo gamecom-standalone-demo gamecom-boot test-core gamecom-test-standalone gamecom-test-video test-audio test-uart gamecom-sdl

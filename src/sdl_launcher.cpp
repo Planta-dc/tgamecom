@@ -7,9 +7,14 @@
 #include <cctype>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <system_error>
 #include <vector>
+
+#if defined(GAMECOM_HAVE_GTK3)
+#include <gtk/gtk.h>
+#endif
 
 namespace {
 namespace fs = std::filesystem;
@@ -24,6 +29,14 @@ constexpr Color accent{73, 211, 179, 255};
 constexpr Color blue{93, 157, 244, 255};
 constexpr Color warning{255, 190, 102, 255};
 constexpr Color disabled{67, 79, 92, 255};
+const std::array<const char *, GC_CONTROL_COUNT> action_names = {
+    "UP", "DOWN", "LEFT", "RIGHT", "A BUTTON", "B BUTTON", "C BUTTON", "D BUTTON",
+    "MENU", "PAUSE", "SOUND", "POWER"
+};
+const std::array<const char *, GC_CONTROL_COUNT> action_keys = {
+    "up", "down", "left", "right", "a", "b", "c", "d",
+    "menu", "pause", "sound", "power"
+};
 
 std::array<unsigned char, 7> glyph(char c)
 {
@@ -115,6 +128,22 @@ fs::path home_directory()
     return ec ? fs::path(".") : current;
 }
 
+fs::path bindings_file()
+{
+    if (const char *xdg = std::getenv("XDG_CONFIG_HOME")) {
+        if (*xdg) return fs::path(xdg) / "gamecom-emulator" / "controls.ini";
+    }
+    return home_directory() / ".config" / "gamecom-emulator" / "controls.ini";
+}
+
+bool key_is_used(const GcInputBindings& bindings, int key, unsigned except)
+{
+    for (unsigned i = 0; i < GC_CONTROL_COUNT; ++i) {
+        if (i != except && bindings.keycodes[i] == key) return true;
+    }
+    return false;
+}
+
 std::string lower_extension(const fs::path& path)
 {
     std::string ext = path.extension().string();
@@ -126,6 +155,69 @@ std::string lower_extension(const fs::path& path)
 
 enum class BrowserMode { FirmwareDirectory, CartridgeFile };
 struct BrowserEntry { fs::path path; std::string name; bool directory; };
+enum class NativePickResult { Unavailable, Cancelled, Selected };
+
+NativePickResult native_file_dialog(BrowserMode mode, const std::string& initial_folder,
+                                    std::string& selected_path)
+{
+#if defined(GAMECOM_HAVE_GTK3)
+    const char *driver = SDL_GetCurrentVideoDriver();
+    if (driver && std::string(driver) == "dummy") return NativePickResult::Unavailable;
+    static bool gtk_checked = false;
+    static bool gtk_ready = false;
+    if (!gtk_checked) {
+        gtk_checked = true;
+        int argc = 0;
+        char **argv = nullptr;
+        gtk_ready = gtk_init_check(&argc, &argv) != FALSE;
+    }
+    if (!gtk_ready) return NativePickResult::Unavailable;
+
+    const bool choose_folder = mode == BrowserMode::FirmwareDirectory;
+    GtkFileChooserNative *dialog = gtk_file_chooser_native_new(
+        choose_folder ? "Select Game.com firmware folder" : "Select Game.com cartridge ROM",
+        nullptr,
+        choose_folder ? GTK_FILE_CHOOSER_ACTION_SELECT_FOLDER : GTK_FILE_CHOOSER_ACTION_OPEN,
+        choose_folder ? "Select Folder" : "Open",
+        "Cancel");
+    if (!dialog) return NativePickResult::Unavailable;
+    gtk_native_dialog_set_modal(GTK_NATIVE_DIALOG(dialog), TRUE);
+    if (!initial_folder.empty())
+        (void)gtk_file_chooser_set_current_folder(GTK_FILE_CHOOSER(dialog), initial_folder.c_str());
+    gtk_file_chooser_set_select_multiple(GTK_FILE_CHOOSER(dialog), FALSE);
+    if (!choose_folder) {
+        GtkFileFilter *filter = gtk_file_filter_new();
+        gtk_file_filter_set_name(filter, "Game.com cartridge images (*.bin)");
+        gtk_file_filter_add_pattern(filter, "*.bin");
+        gtk_file_filter_add_pattern(filter, "*.BIN");
+        gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(dialog), filter);
+        g_object_unref(filter);
+        GtkFileFilter *all = gtk_file_filter_new();
+        gtk_file_filter_set_name(all, "All files");
+        gtk_file_filter_add_pattern(all, "*");
+        gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(dialog), all);
+        g_object_unref(all);
+    }
+    const gint response = gtk_native_dialog_run(GTK_NATIVE_DIALOG(dialog));
+    NativePickResult result = NativePickResult::Cancelled;
+    if (response == GTK_RESPONSE_ACCEPT) {
+        gchar *filename = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dialog));
+        if (filename) {
+            selected_path = filename;
+            g_free(filename);
+            result = NativePickResult::Selected;
+        }
+    }
+    gtk_native_dialog_destroy(GTK_NATIVE_DIALOG(dialog));
+    g_object_unref(dialog);
+    return result;
+#else
+    (void)mode;
+    (void)initial_folder;
+    (void)selected_path;
+    return NativePickResult::Unavailable;
+#endif
+}
 
 void scan_directory(const fs::path& directory, BrowserMode mode,
                     std::vector<BrowserEntry>& entries, std::string& error)
@@ -183,9 +275,12 @@ void draw_button(SDL_Renderer *r, const SDL_Rect& rect, const std::string& label
 }
 
 bool run_browser(SDL_Window *window, SDL_Renderer *renderer, BrowserMode mode,
-                 std::string& result, bool& quit_requested)
+                 const std::string& initial_folder, std::string& result,
+                 bool& quit_requested)
 {
-    fs::path current = home_directory();
+    fs::path current = initial_folder.empty() ? home_directory() : fs::path(initial_folder);
+    std::error_code initial_ec;
+    if (!fs::is_directory(current, initial_ec) || initial_ec) current = home_directory();
     std::vector<BrowserEntry> entries;
     std::string scan_error;
     int selected = 0, first_visible = 0;
@@ -311,6 +406,120 @@ bool run_browser(SDL_Window *window, SDL_Renderer *renderer, BrowserMode mode,
     return accepted;
 }
 
+bool select_path(SDL_Window *window, SDL_Renderer *renderer, BrowserMode mode,
+                 const std::string& initial_folder, std::string& result,
+                 bool& quit_requested, bool& used_internal_browser)
+{
+    used_internal_browser = false;
+    const NativePickResult native = native_file_dialog(mode, initial_folder, result);
+    if (native == NativePickResult::Selected) return true;
+    if (native == NativePickResult::Cancelled) return false;
+    used_internal_browser = true;
+    return run_browser(window, renderer, mode, initial_folder, result, quit_requested);
+}
+
+std::string key_label(int key)
+{
+    if (key == SDLK_UNKNOWN) return "UNASSIGNED";
+    const char *name = SDL_GetKeyName(static_cast<SDL_Keycode>(key));
+    return name && *name ? name : "UNKNOWN";
+}
+
+bool run_controls(SDL_Window *window, SDL_Renderer *renderer,
+                  GcInputBindings& bindings, bool& quit_requested,
+                  std::string& status)
+{
+    bool done = false;
+    int waiting_for = -1;
+    constexpr int row_height = 32;
+    constexpr int first_y = 108;
+
+    while (!done && !quit_requested) {
+        int w = 0, h = 0;
+        SDL_GetRendererOutputSize(renderer, &w, &h);
+        const SDL_Rect defaults_button{48, h - 70, 210, 44};
+        const SDL_Rect done_button{w - 190, h - 70, 142, 44};
+        SDL_Event event;
+        while (SDL_PollEvent(&event)) {
+            if (event.type == SDL_QUIT) { quit_requested = true; done = true; break; }
+            if (event.type == SDL_KEYDOWN && !event.key.repeat) {
+                const SDL_Keycode key = event.key.keysym.sym;
+                if (waiting_for >= 0) {
+                    if (key == SDLK_ESCAPE) {
+                        waiting_for = -1;
+                        status = "KEY CHANGE CANCELLED.";
+                    } else if (key == SDLK_UNKNOWN ||
+                               key_is_used(bindings, static_cast<int>(key),
+                                           static_cast<unsigned>(waiting_for))) {
+                        status = "THAT KEY IS ALREADY ASSIGNED. PRESS A DIFFERENT KEY.";
+                    } else {
+                        bindings.keycodes[static_cast<std::size_t>(waiting_for)] = static_cast<int>(key);
+                        waiting_for = -1;
+                        status = gc_save_input_bindings(bindings)
+                            ? "CONTROL BINDING SAVED."
+                            : "BINDING ACTIVE, BUT COULD NOT SAVE CONFIGURATION.";
+                    }
+                } else if (key == SDLK_ESCAPE) {
+                    done = true;
+                }
+            }
+            if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_LEFT) {
+                int ww = 0, wh = 0;
+                SDL_GetWindowSize(window, &ww, &wh);
+                const int mx = ww > 0 ? event.button.x * w / ww : event.button.x;
+                const int my = wh > 0 ? event.button.y * h / wh : event.button.y;
+                if (inside(mx, my, done_button)) done = true;
+                else if (inside(mx, my, defaults_button)) {
+                    bindings = gc_default_input_bindings();
+                    status = gc_save_input_bindings(bindings)
+                        ? "DEFAULT CONTROLS RESTORED AND SAVED."
+                        : "DEFAULTS ACTIVE, BUT COULD NOT SAVE CONFIGURATION.";
+                    waiting_for = -1;
+                } else {
+                    for (unsigned i = 0; i < GC_CONTROL_COUNT; ++i) {
+                        const SDL_Rect change_button{w - 232,
+                            first_y + static_cast<int>(i) * row_height + 2, 176, 30};
+                        if (inside(mx, my, change_button)) {
+                            waiting_for = static_cast<int>(i);
+                            status = "PRESS A KEY FOR " + std::string(action_names[i]) +
+                                     ". ESC CANCELS THIS CHANGE.";
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if (done || quit_requested) break;
+
+        SDL_SetRenderDrawColor(renderer, background.r, background.g, background.b, background.a);
+        SDL_RenderClear(renderer);
+        text(renderer, 48, 30, "CONTROL SETTINGS", accent, 4, 60);
+        text(renderer, 52, 78, "SELECT CHANGE, THEN PRESS A KEY. MOUSE TOUCH AND ESC STAY FIXED.", muted, 1, 130);
+        const SDL_Rect panel_rect{40, 100, w - 80, row_height * GC_CONTROL_COUNT + 18};
+        fill(renderer, panel_rect, panel);
+        outline(renderer, panel_rect, blue);
+        for (unsigned i = 0; i < GC_CONTROL_COUNT; ++i) {
+            const int y = first_y + static_cast<int>(i) * row_height;
+            const SDL_Rect row{52, y, w - 104, row_height - 2};
+            const SDL_Rect change_button{w - 232, y + 2, 176, 30};
+            if (waiting_for == static_cast<int>(i)) fill(renderer, row, panel_light);
+            text(renderer, 72, y + 9, action_names[i],
+                 waiting_for == static_cast<int>(i) ? accent : ink, 2, 36);
+            draw_button(renderer, change_button,
+                waiting_for == static_cast<int>(i) ? "PRESS A KEY" : key_label(bindings.keycodes[i]),
+                true, waiting_for == static_cast<int>(i));
+        }
+        text(renderer, 52, first_y + row_height * GC_CONTROL_COUNT + 28,
+             status, status.find("ALREADY") != std::string::npos || status.find("COULD NOT") != std::string::npos
+                 ? warning : muted, 1, 140);
+        draw_button(renderer, defaults_button, "RESET DEFAULTS", true);
+        draw_button(renderer, done_button, "DONE", true);
+        SDL_RenderPresent(renderer);
+        SDL_Delay(12);
+    }
+    return !quit_requested;
+}
+
 bool valid_firmware(const std::string& directory)
 {
     if (directory.empty()) return false;
@@ -323,7 +532,86 @@ bool valid_firmware(const std::string& directory)
 }
 }
 
-bool gc_sdl_launcher_run(GcLaunchSelection& selection)
+GcInputBindings gc_default_input_bindings()
+{
+    GcInputBindings bindings;
+    bindings.keycodes = {
+        SDLK_UP, SDLK_DOWN, SDLK_LEFT, SDLK_RIGHT,
+        SDLK_a, SDLK_b, SDLK_c, SDLK_d,
+        SDLK_m, SDLK_p, SDLK_s, SDLK_n
+    };
+    return bindings;
+}
+
+GcInputBindings gc_load_input_bindings()
+{
+    const GcInputBindings defaults = gc_default_input_bindings();
+    std::array<int, GC_CONTROL_COUNT> stored{};
+    stored.fill(SDLK_UNKNOWN);
+    std::ifstream input(bindings_file());
+    std::string line;
+    while (std::getline(input, line)) {
+        if (line.empty() || line[0] == '#') continue;
+        const std::size_t equals = line.find('=');
+        if (equals == std::string::npos) continue;
+        std::string name = line.substr(0, equals);
+        std::string value = line.substr(equals + 1);
+        const auto trim = [](std::string& s) {
+            const std::size_t first = s.find_first_not_of(" \t\r");
+            if (first == std::string::npos) { s.clear(); return; }
+            const std::size_t last = s.find_last_not_of(" \t\r");
+            s = s.substr(first, last - first + 1);
+        };
+        trim(name); trim(value);
+        for (unsigned i = 0; i < GC_CONTROL_COUNT; ++i) {
+            if (name != action_keys[i]) continue;
+            const SDL_Keycode key = SDL_GetKeyFromName(value.c_str());
+            if (key != SDLK_UNKNOWN && key != SDLK_ESCAPE)
+                stored[i] = static_cast<int>(key);
+            break;
+        }
+    }
+
+    GcInputBindings result;
+    result.keycodes.fill(SDLK_UNKNOWN);
+    for (unsigned i = 0; i < GC_CONTROL_COUNT; ++i) {
+        const int key = stored[i];
+        if (key == SDLK_UNKNOWN || key_is_used(result, key, i)) continue;
+        result.keycodes[i] = key;
+    }
+    for (unsigned i = 0; i < GC_CONTROL_COUNT; ++i) {
+        if (result.keycodes[i] != SDLK_UNKNOWN) continue;
+        if (!key_is_used(result, defaults.keycodes[i], i)) {
+            result.keycodes[i] = defaults.keycodes[i];
+            continue;
+        }
+        for (int key = SDLK_F1; key <= SDLK_F12; ++key) {
+            if (!key_is_used(result, key, i)) {
+                result.keycodes[i] = key;
+                break;
+            }
+        }
+    }
+    return result;
+}
+
+bool gc_save_input_bindings(const GcInputBindings& bindings)
+{
+    std::error_code ec;
+    const fs::path path = bindings_file();
+    fs::create_directories(path.parent_path(), ec);
+    if (ec) return false;
+    std::ofstream output(path, std::ios::trunc);
+    if (!output) return false;
+    output << "# Game.com emulator keyboard bindings; edit in the launcher.\n";
+    for (unsigned i = 0; i < GC_CONTROL_COUNT; ++i) {
+        output << action_keys[i] << '='
+               << SDL_GetKeyName(static_cast<SDL_Keycode>(bindings.keycodes[i])) << '\n';
+    }
+    return output.good();
+}
+
+bool gc_sdl_launcher_run(GcLaunchSelection& selection, GcInputBindings& bindings)
 {
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) != 0) return false;
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "0");
@@ -331,19 +619,20 @@ bool gc_sdl_launcher_run(GcLaunchSelection& selection)
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 960, 640,
         SDL_WINDOW_RESIZABLE);
     if (!window) { SDL_Quit(); return false; }
-    SDL_SetWindowMinimumSize(window, 800, 560);
+    SDL_SetWindowMinimumSize(window, 800, 600);
     SDL_Renderer *renderer = SDL_CreateRenderer(window, -1,
         SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
     if (!renderer) renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_SOFTWARE);
     if (!renderer) { SDL_DestroyWindow(window); SDL_Quit(); return false; }
 
     bool done = false, quit = false, started = false;
-    bool choose_firmware = false, choose_rom = false;
+    bool choose_firmware = false, choose_rom = false, choose_controls = false;
     std::string status = "BROWSE FOR YOUR OWN FIRMWARE AND OPTIONAL GAME ROM.";
     int focus = 0;
     while (!done && !quit) {
         int w = 0, h = 0;
         SDL_GetRendererOutputSize(renderer, &w, &h);
+        const SDL_Rect controls_button{w - 220, 40, 170, 46};
         const SDL_Rect firmware_button{w - 220, 166, 170, 46};
         const SDL_Rect rom_button{w - 220, 304, 170, 46};
         const SDL_Rect bios_button{48, h - 104, 230, 56};
@@ -360,13 +649,15 @@ bool gc_sdl_launcher_run(GcLaunchSelection& selection)
                 if (key == SDLK_ESCAPE) done = true;
                 else if (key == SDLK_1) choose_firmware = true;
                 else if (key == SDLK_2) choose_rom = true;
-                else if (key == SDLK_TAB || key == SDLK_RIGHT || key == SDLK_LEFT) focus = (focus + 1) % 5;
+                else if (key == SDLK_3) choose_controls = true;
+                else if (key == SDLK_TAB || key == SDLK_RIGHT || key == SDLK_LEFT) focus = (focus + 1) % 6;
                 else if (key == SDLK_RETURN || key == SDLK_KP_ENTER) {
                     if (focus == 0) choose_firmware = true;
                     else if (focus == 1) choose_rom = true;
-                    else if (focus == 2 && firmware_ok) started = true;
-                    else if (focus == 3 && firmware_ok && rom_ok) started = true;
-                    else if (focus == 4) done = true;
+                    else if (focus == 2) choose_controls = true;
+                    else if (focus == 3 && firmware_ok) started = true;
+                    else if (focus == 4 && firmware_ok && rom_ok) started = true;
+                    else if (focus == 5) done = true;
                     if (started) done = true;
                 }
             }
@@ -375,7 +666,8 @@ bool gc_sdl_launcher_run(GcLaunchSelection& selection)
                 SDL_GetWindowSize(window, &ww, &wh);
                 const int mx = ww > 0 ? event.button.x * w / ww : event.button.x;
                 const int my = wh > 0 ? event.button.y * h / wh : event.button.y;
-                if (inside(mx, my, firmware_button)) { choose_firmware = true; focus = 0; }
+                if (inside(mx, my, controls_button)) { choose_controls = true; focus = 2; }
+                else if (inside(mx, my, firmware_button)) { choose_firmware = true; focus = 0; }
                 else if (inside(mx, my, rom_button)) { choose_rom = true; focus = 1; }
                 else if (inside(mx, my, bios_button) && firmware_ok) { started = true; done = true; }
                 else if (inside(mx, my, game_button) && firmware_ok && rom_ok) { started = true; done = true; }
@@ -386,27 +678,46 @@ bool gc_sdl_launcher_run(GcLaunchSelection& selection)
 
         if (choose_firmware) {
             choose_firmware = false;
+            const std::string initial = selection.firmware_dir.empty()
+                ? home_directory().string() : selection.firmware_dir;
             std::string path;
-            if (run_browser(window, renderer, BrowserMode::FirmwareDirectory, path, quit)) {
+            bool used_fallback = false;
+            if (select_path(window, renderer, BrowserMode::FirmwareDirectory,
+                            initial, path, quit, used_fallback)) {
                 selection.firmware_dir = path;
                 status = valid_firmware(path)
                     ? "FIRMWARE FOUND. YOU CAN BOOT THE BIOS OR LOAD A GAME."
                     : "FOLDER SELECTED, BUT INTERNAL.BIN AND/OR EXTERNAL.BIN IS MISSING.";
+                if (used_fallback) status = "IN-APP PICKER: " + status;
             }
         }
         if (choose_rom) {
             choose_rom = false;
+            std::string initial = selection.firmware_dir.empty()
+                ? home_directory().string() : selection.firmware_dir;
+            if (!selection.cartridge_path.empty())
+                initial = fs::path(selection.cartridge_path).parent_path().string();
             std::string path;
-            if (run_browser(window, renderer, BrowserMode::CartridgeFile, path, quit)) {
+            bool used_fallback = false;
+            if (select_path(window, renderer, BrowserMode::CartridgeFile,
+                            initial, path, quit, used_fallback)) {
                 selection.cartridge_path = path;
                 status = "GAME ROM SELECTED. ROMS ARE NOT INCLUDED IN THE APPIMAGE.";
+                if (used_fallback) status = "IN-APP PICKER: " + status;
             }
+        }
+        if (choose_controls) {
+            choose_controls = false;
+            status = "CONTROLS SAVE AUTOMATICALLY TO YOUR USER CONFIGURATION.";
+            (void)run_controls(window, renderer, bindings, quit, status);
+            focus = 2;
         }
         if (quit) break;
 
         SDL_SetRenderDrawColor(renderer, background.r, background.g, background.b, background.a);
         SDL_RenderClear(renderer);
         text(renderer, 48, 42, "GAME.COM EMULATOR", accent, 4, 60);
+        draw_button(renderer, controls_button, "CONTROLS", true, focus == 2);
         text(renderer, 52, 86, "SELECT YOUR FIRMWARE AND OPTIONAL CARTRIDGE", muted, 2, 88);
 
         const SDL_Rect fw_panel{40, 128, w - 80, 108};
@@ -426,10 +737,10 @@ bool gc_sdl_launcher_run(GcLaunchSelection& selection)
 
         text(renderer, 50, 407, status, status.find("MISSING") != std::string::npos ? warning : muted, 2, 110);
         text(renderer, 50, 436, "FIRMWARE FOLDER MUST CONTAIN INTERNAL.BIN AND EXTERNAL.BIN.", muted, 1, 120);
-        draw_button(renderer, bios_button, "BOOT BIOS", firmware_ok, focus == 2);
-        draw_button(renderer, game_button, "BOOT GAME", firmware_ok && rom_ok, focus == 3);
-        draw_button(renderer, quit_button, "QUIT", true, focus == 4);
-        text(renderer, 50, h - 34, "KEYBOARD: 1 FIRMWARE  2 GAME  TAB CYCLE  ENTER SELECT  ESC QUIT", muted, 1, 120);
+        draw_button(renderer, bios_button, "BOOT BIOS", firmware_ok, focus == 3);
+        draw_button(renderer, game_button, "BOOT GAME", firmware_ok && rom_ok, focus == 4);
+        draw_button(renderer, quit_button, "QUIT", true, focus == 5);
+        text(renderer, 50, h - 34, "KEYBOARD: 1 FIRMWARE  2 GAME  3 CONTROLS  TAB CYCLE  ENTER SELECT", muted, 1, 120);
         SDL_RenderPresent(renderer);
         SDL_Delay(12);
     }
