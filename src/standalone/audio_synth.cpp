@@ -61,9 +61,10 @@ void AudioSynth::apply_write(const SoundRegisterWrite& write) noexcept
     }
 }
 
-void AudioSynth::advance_cycles(std::uint64_t cycles) noexcept
+void AudioSynth::advance_cycles(std::uint64_t cycles, std::uint32_t cpu_hz) noexcept
 {
     if (cycles == 0) return;
+    if (cpu_hz == 0) cpu_hz = GC_CPU_HZ;
     const unsigned sgc = m_registers[0];
     for (unsigned channel = 0; channel < 2; ++channel) {
         const unsigned enable = 1u << channel;
@@ -78,7 +79,7 @@ void AudioSynth::advance_cycles(std::uint64_t cycles) noexcept
                                 m_registers[timer_index + 1u];
         if (period == 0) continue;
         const double increment = static_cast<double>(cycles) * kWaveRateClock /
-            (static_cast<double>(period) * GC_CPU_HZ);
+            (static_cast<double>(period) * static_cast<double>(cpu_hz));
         m_channels[channel].phase = std::fmod(m_channels[channel].phase + increment, 32.0);
     }
 }
@@ -112,9 +113,11 @@ float AudioSynth::direct_dac_value() const noexcept
 void AudioSynth::render(const std::vector<SoundRegisterWrite>& writes,
                         std::uint64_t start_cycle, std::uint64_t end_cycle,
                         std::int16_t *output, std::size_t frames,
-                        unsigned sample_rate) noexcept
+                        unsigned sample_rate,
+                        std::uint32_t cpu_hz) noexcept
 {
     if (end_cycle < start_cycle) return;
+    if (cpu_hz == 0) cpu_hz = GC_CPU_HZ;
     const std::uint64_t span = end_cycle - start_cycle;
     std::uint64_t cursor = start_cycle;
     std::size_t event_index = 0;
@@ -123,11 +126,11 @@ void AudioSynth::render(const std::vector<SoundRegisterWrite>& writes,
         for (const SoundRegisterWrite& write : writes) {
             if (write.cycle > end_cycle) break;
             const std::uint64_t event_cycle = std::max(cursor, std::max(start_cycle, write.cycle));
-            advance_cycles(event_cycle - cursor);
+            advance_cycles(event_cycle - cursor, cpu_hz);
             cursor = event_cycle;
             apply_write(write);
         }
-        advance_cycles(end_cycle - cursor);
+        advance_cycles(end_cycle - cursor, cpu_hz);
         return;
     }
 
@@ -137,13 +140,13 @@ void AudioSynth::render(const std::vector<SoundRegisterWrite>& writes,
         while (event_index < writes.size() && writes[event_index].cycle <= sample_cycle) {
             const std::uint64_t event_cycle = std::max(cursor,
                 std::max(start_cycle, writes[event_index].cycle));
-            advance_cycles(event_cycle - cursor);
+            advance_cycles(event_cycle - cursor, cpu_hz);
             cursor = event_cycle;
             apply_write(writes[event_index]);
             ++event_index;
         }
         if (sample_cycle > cursor) {
-            advance_cycles(sample_cycle - cursor);
+            advance_cycles(sample_cycle - cursor, cpu_hz);
             cursor = sample_cycle;
         }
         output[frame] = to_pcm(channel_value(0) + channel_value(1) + direct_dac_value());
@@ -152,12 +155,12 @@ void AudioSynth::render(const std::vector<SoundRegisterWrite>& writes,
     while (event_index < writes.size() && writes[event_index].cycle <= end_cycle) {
         const std::uint64_t event_cycle = std::max(cursor,
             std::max(start_cycle, writes[event_index].cycle));
-        advance_cycles(event_cycle - cursor);
+        advance_cycles(event_cycle - cursor, cpu_hz);
         cursor = event_cycle;
         apply_write(writes[event_index]);
         ++event_index;
     }
-    advance_cycles(end_cycle - cursor);
+    advance_cycles(end_cycle - cursor, cpu_hz);
 }
 
 }

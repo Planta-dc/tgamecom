@@ -37,7 +37,7 @@ void Sm8521Cpu::reset()
     m_timers[1] = TimerState{};
     m_next_vblank = GAMECOM_FRAME_CYCLES;
     m_next_clock_tick = 0;
-    m_clock_tick_period = 5529600;
+    m_clock_tick_period = m_cpu_hz;
     m_cycles = 0;
     m_instructions = 0;
     m_dma_transfers = 0;
@@ -71,6 +71,28 @@ bool Sm8521Cpu::queue_uart_receive(uint8_t value)
         return false;
     m_uart_rx_queue.push_back(value);
     return true;
+}
+
+void Sm8521Cpu::trigger_vblank() noexcept
+{
+    request_interrupt(5);
+    ++m_vblank_ticks;
+}
+
+void Sm8521Cpu::set_clock_hz(uint32_t cpu_hz) noexcept
+{
+    if (cpu_hz < 100000u) cpu_hz = 100000u;
+    if (m_cpu_hz == cpu_hz) return;
+    m_cpu_hz = cpu_hz;
+    if (m_next_clock_tick != 0) {
+        const uint8_t clkt = m_machine.bus.reg_file[0x54];
+        const uint64_t new_period = (clkt & 0x40u)
+            ? 60ull * static_cast<uint64_t>(m_cpu_hz)
+            : static_cast<uint64_t>(m_cpu_hz);
+        m_clock_tick_period = new_period;
+        if (m_next_clock_tick > m_cycles + new_period)
+            m_next_clock_tick = m_cycles + new_period;
+    }
 }
 
 uint64_t Sm8521Cpu::uart_frame_cycles() const noexcept
@@ -146,12 +168,8 @@ uint8_t Sm8521Cpu::uart_read_register(uint8_t address)
 uint8_t Sm8521Cpu::mem_readbyte(uint32_t address)
 {
     address &= 0xFFFFu;
-    if (address < 0x10u) {
-        const uint32_t effective = address + (m_PS0 & 0xF8u);
-        if (effective >= 0x2Bu && effective <= 0x2Eu)
-            return uart_read_register(static_cast<uint8_t>(effective));
-        return m_register_ram[effective];
-    }
+    if (address < 0x10u)
+        return m_register_ram[address + (m_PS0 & 0xF8u)];
     if (address >= 0x2Bu && address <= 0x2Eu)
         return uart_read_register(static_cast<uint8_t>(address));
     return gc_bus_read(&m_machine, static_cast<uint16_t>(address));
@@ -160,28 +178,23 @@ uint8_t Sm8521Cpu::mem_readbyte(uint32_t address)
 void Sm8521Cpu::mem_writebyte(uint32_t address, uint8_t value)
 {
     address &= 0xFFFFu;
-    const uint32_t effective = address < 0x10u ? address + (m_PS0 & 0xF8u) : address;
-    if (effective >= 0x40u && effective < 0x80u)
-        m_sound_writes.push_back({m_cycles, static_cast<uint8_t>(effective), value});
-    if (address < 0x10u)
-        m_register_ram[effective] = value;
+    if (address < 0x10u) {
+        m_register_ram[address + (m_PS0 & 0xF8u)] = value;
+        gc_bus_write(&m_machine, static_cast<uint16_t>(address), value);
+        return;
+    }
 
-    if (effective >= 0x2Bu && effective <= 0x2Eu) {
-        if (address < 0x10u)
-            gc_bus_write(&m_machine, static_cast<uint16_t>(address), value);
-        if (effective == 0x2Bu) uart_write_data(value);
-        else if (effective == 0x2Eu) uart_write_control(value);
-        gc_bus_write(&m_machine, static_cast<uint16_t>(effective), value);
+    if (address >= 0x40u && address < 0x80u)
+        m_sound_writes.push_back({m_cycles, static_cast<uint8_t>(address), value});
+
+    if (address >= 0x2Bu && address <= 0x2Eu) {
+        if (address == 0x2Bu) uart_write_data(value);
+        else if (address == 0x2Eu) uart_write_control(value);
+        gc_bus_write(&m_machine, static_cast<uint16_t>(address), value);
         m_machine.bus.reg_file[0x2B] = m_uart_tx_data;
         m_machine.bus.reg_file[0x2C] = m_uart_rx_data;
         m_machine.bus.reg_file[0x2D] = m_uart_status;
         m_machine.bus.reg_file[0x2E] = m_uart_control;
-        return;
-    }
-
-    if (address < 0x10u && effective >= 0x40u && effective < 0x80u) {
-        gc_bus_write(&m_machine, static_cast<uint16_t>(address), value);
-        gc_bus_write(&m_machine, static_cast<uint16_t>(effective), value);
         return;
     }
 
@@ -212,7 +225,9 @@ void Sm8521Cpu::mem_writebyte(uint32_t address, uint8_t value)
     case 0x53: m_timers[1].upcounter_max = value; m_machine.bus.reg_file[address] = 0; break;
     case 0x54:
         if (value & 0x80u) {
-            m_clock_tick_period = (value & 0x40u) ? 60ull * 5529600ull : 5529600ull;
+            m_clock_tick_period = (value & 0x40u)
+                ? 60ull * static_cast<uint64_t>(m_cpu_hz)
+                : static_cast<uint64_t>(m_cpu_hz);
             m_next_clock_tick = m_cycles + m_clock_tick_period;
         } else {
             m_next_clock_tick = 0;
@@ -536,16 +551,19 @@ void Sm8521Cpu::advance_devices(unsigned cycles)
             ++m_machine.bus.reg_file[data_reg];
             if (m_machine.bus.reg_file[data_reg] >= state.upcounter_max) {
                 m_machine.bus.reg_file[data_reg] = 0;
+                const bool priority_ok = timer == 0 || ((m_machine.bus.reg_file[0x1Eu] & 7u) < 4u);
                 if ((m_machine.bus.reg_file[enable_reg] & enable_bit) &&
-                    (m_machine.bus.reg_file[0x1F] & FLAG_I))
+                    (m_machine.bus.reg_file[0x1F] & FLAG_I) && priority_ok)
                     request_interrupt(timer == 0 ? 2u : 6u);
             }
         }
     }
-    while (m_cycles >= m_next_vblank) {
-        request_interrupt(5); /* Approximate MAME's periodic LCD vblank IRQ. */
-        ++m_vblank_ticks;
-        m_next_vblank += GAMECOM_FRAME_CYCLES;
+    if (!m_external_vblank) {
+        while (m_cycles >= m_next_vblank) {
+            request_interrupt(5); /* Approximate MAME's periodic LCD vblank IRQ. */
+            ++m_vblank_ticks;
+            m_next_vblank += GAMECOM_FRAME_CYCLES;
+        }
     }
     while (m_next_clock_tick && m_cycles >= m_next_clock_tick) {
         uint8_t value = static_cast<uint8_t>(m_machine.bus.reg_file[0x54] + 1u);
@@ -575,6 +593,7 @@ bool Sm8521Cpu::step()
     uint32_t res = 0;
 
     load_sfr_state();
+    const uint8_t prev_ps0 = m_PS0;
     uint8_t op = mem_readbyte(m_PC++);
     switch (op) {
 #include "sm85ops_mame.inc"
@@ -582,7 +601,8 @@ bool Sm8521Cpu::step()
 
     if (m_SYS & 0x40u) gc_bus_write(&m_machine, 0x1C, static_cast<uint8_t>(m_SP >> 8));
     gc_bus_write(&m_machine, 0x1D, static_cast<uint8_t>(m_SP));
-    mem_writebyte(0x1E, m_PS0);
+    if (m_PS0 != prev_ps0 || m_machine.bus.reg_file[0x1E] != m_PS0)
+        mem_writebyte(0x1E, m_PS0);
     mem_writebyte(0x1F, m_PS1);
 
     if (mycycles <= 0) mycycles = 1;

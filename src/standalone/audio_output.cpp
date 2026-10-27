@@ -32,6 +32,11 @@ bool AudioOutput::start(std::string& error)
     config.dataCallback = &AudioOutput::data_callback;
     config.pUserData = this;
 
+    m_ring.fill(0);
+    m_read_index.store(0, std::memory_order_relaxed);
+    m_write_index.store(prebuffer_frames, std::memory_order_release);
+    m_last_sample = 0;
+
     ma_result result = ma_device_init(nullptr, &config, m_device);
     if (result != MA_SUCCESS) {
         error = ma_result_description(result);
@@ -68,6 +73,13 @@ void AudioOutput::push(const std::int16_t *samples, std::size_t frames) noexcept
     m_write_index.store(write + frames, std::memory_order_release);
 }
 
+std::size_t AudioOutput::buffered_frames() const noexcept
+{
+    const std::uint64_t write = m_write_index.load(std::memory_order_acquire);
+    const std::uint64_t read = m_read_index.load(std::memory_order_acquire);
+    return write >= read ? static_cast<std::size_t>(write - read) : 0u;
+}
+
 void AudioOutput::data_callback(ma_device *device, void *output, const void *,
                                 std::uint32_t frame_count)
 {
@@ -79,11 +91,17 @@ void AudioOutput::consume(std::int16_t *output, std::uint32_t frames) noexcept
 {
     std::uint64_t read = m_read_index.load(std::memory_order_relaxed);
     const std::uint64_t write = m_write_index.load(std::memory_order_acquire);
+    std::int16_t sample = m_last_sample;
     for (std::uint32_t i = 0; i < frames; ++i) {
-        const std::int16_t sample = read != write ? m_ring[read++ & ring_mask] : 0;
+        if (read != write) {
+            sample = m_ring[read++ & ring_mask];
+        } else {
+            sample = static_cast<std::int16_t>((static_cast<int>(sample) * 31) / 32);
+        }
         output[2u * i] = sample;
         output[2u * i + 1u] = sample;
     }
+    m_last_sample = sample;
     m_read_index.store(read, std::memory_order_release);
 }
 

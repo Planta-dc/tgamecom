@@ -65,6 +65,29 @@ int main()
                  dac_start + dac_span * 2, pcm.get(), dac_frames, rate);
     for (std::size_t i = 0; i < dac_frames; ++i) assert(pcm[i] == 0);
 
-    std::puts("SM8521 sound tests passed (SG0 waveform, timed DAC writes, enable gates).");
+    /* Scaling CPU clock (e.g. 150%) while passing the scaled cpu_hz preserves
+     * waveform frequency over the same wall-clock audio frame count. */
+    standalone::AudioSynth synth_100, synth_150;
+    auto pcm_100 = std::make_unique<std::int16_t[]>(frames);
+    auto pcm_150 = std::make_unique<std::int16_t[]>(frames);
+    constexpr std::uint32_t cpu_150 = (GC_CPU_HZ * 3u) / 2u;
+    constexpr std::uint64_t span_150 =
+        static_cast<std::uint64_t>(frames) * cpu_150 / rate;
+    synth_100.render(writes, 0, cycle_span, pcm_100.get(), frames, rate, GC_CPU_HZ);
+    synth_150.render(writes, 0, span_150, pcm_150.get(), frames, rate, cpu_150);
+    auto count_crossings = [&](const std::int16_t *buf) {
+        unsigned crossings = 0;
+        for (std::size_t i = 1; i < frames; ++i) {
+            if ((buf[i - 1] < 0 && buf[i] > 0) || (buf[i - 1] > 0 && buf[i] < 0))
+                ++crossings;
+        }
+        return crossings;
+    };
+    const unsigned cross_100 = count_crossings(pcm_100.get());
+    const unsigned cross_150 = count_crossings(pcm_150.get());
+    const unsigned diff = cross_100 > cross_150 ? cross_100 - cross_150 : cross_150 - cross_100;
+    assert(cross_100 > 600u && diff <= 2u);
+
+    std::puts("SM8521 sound tests passed (SG0 waveform, timed DAC writes, enable gates, CPU speed pitch invariance).");
     return 0;
 }

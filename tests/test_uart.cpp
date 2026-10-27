@@ -77,12 +77,23 @@ int main()
     assert(Access::read(cpu, 0x2C) == '1');
     assert((Access::read(cpu, 0x2D) & 0x10u) == 0); // Reading URTS clears OR.
 
-    // The UART remains reachable through the selected register-file window.
+    // Banked general-purpose registers (R0..R15 via PS0) stay inside internal
+    // register RAM and never clobber UART or sound SFRs (e.g. BIOS PS0=0x38).
+    Access::write(cpu, 0x2E, 0x1C);
     Access::write(cpu, 0x1E, 0x28);
-    Access::write(cpu, 0x06, 0x1C); // RP 0x28 + R6 -> URTC 0x2E.
-    assert(Access::read(cpu, 0x06) == 0x1C);
+    Access::write(cpu, 0x06, 0xA5); // RP 0x28 + R6 -> internal GP reg, NOT URTC 0x2E.
+    assert(Access::read(cpu, 0x06) == 0xA5);
+    assert(Access::read(cpu, 0x2E) == 0x1C);
+
+    Access::write(cpu, 0x40, 0x80);
+    cpu.clear_sound_writes();
+    Access::write(cpu, 0x1E, 0x38);
+    Access::write(cpu, 0x08, 0x5A); // RP 0x38 + R8 -> internal GP reg, NOT SGC 0x40.
+    assert(Access::read(cpu, 0x08) == 0x5A);
+    assert(Access::read(cpu, 0x40) == 0x80);
+    assert(cpu.sound_writes().empty());
 
     std::free(machine);
-    std::cout << "SM8521 UART tests passed (registers, 9600-baud timing, RX/TX, overrun).\n";
+    std::cout << "SM8521 UART tests passed (registers, 9600-baud timing, RX/TX, overrun, PS0 isolation).\n";
     return 0;
 }
