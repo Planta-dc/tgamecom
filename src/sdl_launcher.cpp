@@ -1,3 +1,4 @@
+#include "gamecom.h"
 #include "sdl_ui.hpp"
 
 #include <algorithm>
@@ -103,6 +104,11 @@ fs::path bindings_file()
 fs::path launcher_state_file()
 {
     return config_directory() / "launcher.ini";
+}
+
+fs::path default_nvram_file()
+{
+    return config_directory() / "nvram.sav";
 }
 
 void trim_string(std::string& s)
@@ -759,7 +765,7 @@ bool run_browser(SDL_Window *window, SDL_Renderer *renderer, const GcUiFont& fon
             font.draw(modal.x + 24, modal.y + modal.h - 114, scan_error, warning, 2, 62);
         else if (dir_has_fw)
             font.draw(modal.x + 24, modal.y + modal.h - 114,
-                      "INTERNAL.BIN + EXTERNAL.BIN DETECTED IN THIS FOLDER!", accent, 2, 62);
+                      "EXTERNAL.BIN DETECTED IN THIS FOLDER (INTERNAL.BIN OPTIONAL)!", accent, 2, 62);
 
         const std::string hint = mode == BrowserMode::FirmwareDirectory
             ? "WHEEL/ARROWS SCROLL  DOUBLE-CLICK/ENTER OPENS  BACKSPACE UP  S SELECTS FOLDER"
@@ -836,7 +842,9 @@ enum class ItemOp {
     ToggleMute,
     SetVolume,
     ToggleIntegerScale,
-    ToggleAutoHideBar
+    ToggleAutoHideBar,
+    SetSerialMode,
+    ToggleWarmBootSeed
 };
 
 struct DropdownItem {
@@ -872,11 +880,11 @@ DropdownLayout build_dropdown_layout(int tab, int win_w, int win_h,
     const auto tabs = build_menubar_tabs(sel, win_w);
     if (tab < 0 || tab >= static_cast<int>(tabs.size())) return out;
 
-    const bool compact = win_h < 500;
-    const int row_h = compact ? 21 : 26;
-    const int div_h = compact ? 6 : 8;
+    const bool compact = (win_h < 500) || (tab == 0 && win_h < 640);
+    const int row_h = compact ? 20 : 25;
+    const int div_h = compact ? 5 : 7;
     out.text_scale = compact ? 1 : 2;
-    const int panel_w = std::min(win_w - 12, 376);
+    const int panel_w = std::min(win_w - 12, 392);
     int panel_x = tabs[static_cast<std::size_t>(tab)].rect.x;
     if (panel_x + panel_w > win_w - 6) panel_x = std::max(6, win_w - panel_w - 6);
 
@@ -906,12 +914,41 @@ DropdownLayout build_dropdown_layout(int tab, int win_w, int win_h,
     const bool fw_ok = gc_ui_valid_firmware(sel.firmware_dir);
 
     if (tab == 0) {
-        add_item("LOAD CARTRIDGE ROM...", true, false, false,
+        add_item("LOAD SLOT 1 ROM...", true, false, false,
                  ItemOp::Action, GcMenuAction::LoadCartridgeRom);
+        add_item(sel.cartridge2_path.empty() ? "LOAD SLOT 2 ROM..." : "CHANGE SLOT 2 ROM...",
+                 true, !sel.cartridge2_path.empty(), false,
+                 ItemOp::Action, GcMenuAction::LoadSlot2Rom);
+        if (!sel.cartridge2_path.empty()) {
+            add_item("EJECT SLOT 2 ROM", true, false, false,
+                     ItemOp::Action, GcMenuAction::EjectSlot2Rom);
+        }
         add_item("SET FIRMWARE FOLDER...", true, false, false,
                  ItemOp::Action, GcMenuAction::SetFirmwareFolder);
         add_item("BOOT BIOS MENU (NO CART)", fw_ok, false, false,
                  ItemOp::Action, GcMenuAction::BootBiosOnly);
+        add_div();
+        add_item("SAVE 8KB NVRAM NOW", emulation_ready, false, false,
+                 ItemOp::Action, GcMenuAction::SaveNvramNow);
+        add_item(sel.warm_boot_nvram ? "[X] SEED WARM-BOOT NVRAM" : "[ ] SEED WARM-BOOT NVRAM",
+                 true, sel.warm_boot_nvram, true, ItemOp::ToggleWarmBootSeed);
+        add_div();
+        add_item(sel.serial_mode == GC_SERIAL_OFF ? "(*) SERIAL: OFF" : "( ) SERIAL: OFF",
+                 true, sel.serial_mode == GC_SERIAL_OFF, true,
+                 ItemOp::SetSerialMode, GcMenuAction::None, 0.0);
+        add_item(sel.serial_mode == GC_SERIAL_MODEM
+                     ? "(*) SERIAL: MODEM (9600 AT)" : "( ) SERIAL: MODEM (9600 AT)",
+                 true, sel.serial_mode == GC_SERIAL_MODEM, true,
+                 ItemOp::SetSerialMode, GcMenuAction::None, 1.0);
+        add_item(sel.serial_mode == GC_SERIAL_TCP_HOST
+                     ? "(*) SERIAL: 2P HOST (TCP)" : "( ) SERIAL: 2P HOST (TCP)",
+                 true, sel.serial_mode == GC_SERIAL_TCP_HOST, true,
+                 ItemOp::SetSerialMode, GcMenuAction::None, 2.0);
+        add_item(sel.serial_mode == GC_SERIAL_TCP_CLIENT
+                     ? ("(*) SERIAL: 2P JOIN " + sel.serial_endpoint)
+                     : "( ) SERIAL: 2P JOIN (TCP)...",
+                 true, sel.serial_mode == GC_SERIAL_TCP_CLIENT, false,
+                 ItemOp::Action, GcMenuAction::PromptSerialEndpoint);
         add_div();
         add_item("RESET EMULATION", emulation_ready, false, false,
                  ItemOp::Action, GcMenuAction::ResetEmulation);
@@ -957,10 +994,10 @@ DropdownLayout build_dropdown_layout(int tab, int win_w, int win_h,
         static constexpr std::array<Preset, 8> presets = {{
             {30.0, "30.0 HZ  (HALF RATE)"},
             {50.0, "50.0 HZ  (PAL)"},
-            {55.2, "55.2 HZ"},
-            {59.732155, "59.73 HZ (MAME REF)"},
-            {60.0, "60.0 HZ  (DEFAULT)"},
+            {59.732155, "59.73 HZ (MAME LEGACY)"},
+            {60.0, "60.0 HZ  (TV / VSYNC)"},
             {75.0, "75.0 HZ"},
+            {GC_LCD_NATIVE_HZ, "75.48 HZ (HW NATIVE)"},
             {90.0, "90.0 HZ"},
             {120.0, "120.0 HZ"}
         }};
@@ -999,12 +1036,12 @@ DropdownLayout build_dropdown_layout(int tab, int win_w, int win_h,
 
         struct CpuPreset { unsigned pct; const char *name; };
         static constexpr std::array<CpuPreset, 6> cpu_presets = {{
-            {75u,  "CPU 75%  (4.15 MHZ)"},
-            {100u, "CPU 100% (5.53 MHZ STD)"},
-            {120u, "CPU 120% (6.64 MHZ REC)"},
-            {150u, "CPU 150% (8.29 MHZ)"},
-            {200u, "CPU 200% (11.06 MHZ)"},
-            {300u, "CPU 300% (16.59 MHZ)"}
+            {75u,  "CPU 75%  (3.75 MHZ)"},
+            {100u, "CPU 100% (5.00 MHZ HW)"},
+            {120u, "CPU 120% (6.00 MHZ)"},
+            {150u, "CPU 150% (7.50 MHZ)"},
+            {200u, "CPU 200% (10.00 MHZ)"},
+            {300u, "CPU 300% (15.00 MHZ)"}
         }};
         for (const auto& p : cpu_presets) {
             const bool active = sel.timing.cpu_speed_percent == p.pct;
@@ -1208,15 +1245,15 @@ bool gc_ui_valid_firmware(const std::string& directory)
     if (directory.empty()) return false;
     std::error_code ec;
     const fs::path base(directory);
-    const bool internal = fs::is_regular_file(base / "internal.bin", ec) && !ec;
-    ec.clear();
     const bool external = fs::is_regular_file(base / "external.bin", ec) && !ec;
-    return internal && external;
+    ec.clear();
+    const bool boot_alias = fs::is_regular_file(base / "boot.rom", ec) && !ec;
+    return external || boot_alias;
 }
 
 double gc_ui_clamp_lcd_hz(double hz)
 {
-    if (!std::isfinite(hz)) return 60.0;
+    if (!std::isfinite(hz)) return GC_LCD_NATIVE_HZ;
     return std::max(10.0, std::min(240.0, hz));
 }
 
@@ -1233,7 +1270,9 @@ unsigned gc_ui_clamp_game_pace(unsigned pct)
 std::string gc_ui_format_lcd_hz(double hz)
 {
     char buf[48];
-    if (std::fabs(hz - 59.732155) < 0.01)
+    if (std::fabs(hz - GC_LCD_NATIVE_HZ) < 0.01)
+        std::snprintf(buf, sizeof(buf), "75.48 HZ");
+    else if (std::fabs(hz - 59.732155) < 0.01)
         std::snprintf(buf, sizeof(buf), "59.73 HZ");
     else if (std::fabs(hz - std::round(hz)) < 0.005)
         std::snprintf(buf, sizeof(buf), "%.0f HZ", hz);
@@ -1245,7 +1284,8 @@ std::string gc_ui_format_lcd_hz(double hz)
 std::string gc_ui_format_cpu_speed(unsigned pct)
 {
     char buf[48];
-    const double mhz = (5.5296 * static_cast<double>(pct)) / 100.0;
+    const double mhz = ((static_cast<double>(GC_CPU_HZ) / 1000000.0) *
+                        static_cast<double>(pct)) / 100.0;
     std::snprintf(buf, sizeof(buf), "%u%% (%.2f MHZ)", pct, mhz);
     return buf;
 }
@@ -1509,6 +1549,103 @@ bool gc_ui_prompt_number_modal(SDL_Window *window, SDL_Renderer *renderer,
     return accepted && !quit_requested;
 }
 
+bool gc_ui_prompt_text_modal(SDL_Window *window, SDL_Renderer *renderer,
+                             const GcUiFont& font, bool vsync_active,
+                             const std::string& title, const std::string& subtitle,
+                             const std::string& initial_value, std::string& out_value,
+                             bool& quit_requested)
+{
+    std::string text_buf = initial_value;
+    std::string err_msg;
+    bool done = false;
+    bool accepted = false;
+    int mouse_x = 0, mouse_y = 0;
+    SDL_GetMouseState(&mouse_x, &mouse_y);
+
+    SDL_StartTextInput();
+
+    auto try_apply = [&]() {
+        std::string trimmed = text_buf;
+        trim_string(trimmed);
+        if (trimmed.empty()) {
+            err_msg = "ENTER HOST:PORT (E.G. 127.0.0.1:1997).";
+            return;
+        }
+        out_value = trimmed;
+        accepted = true;
+        done = true;
+    };
+
+    while (!done && !quit_requested) {
+        int w = 0, h = 0;
+        SDL_GetRendererOutputSize(renderer, &w, &h);
+        SDL_Rect modal{(w - 580) / 2, (h - 250) / 2, 580, 250};
+        if (modal.x < 12) { modal.x = 12; modal.w = w - 24; }
+        if (modal.y < 12) { modal.y = 12; modal.h = h - 24; }
+        const SDL_Rect input_box{modal.x + 28, modal.y + 104, modal.w - 56, 48};
+        const SDL_Rect apply_btn{modal.x + 28, modal.y + modal.h - 62, 180, 42};
+        const SDL_Rect cancel_btn{modal.x + modal.w - 188, modal.y + modal.h - 62, 160, 42};
+
+        SDL_Event event;
+        while (SDL_PollEvent(&event)) {
+            if (event.type == SDL_QUIT) { quit_requested = true; done = true; break; }
+            if (event.type == SDL_MOUSEMOTION) {
+                mouse_x = event.motion.x;
+                mouse_y = event.motion.y;
+            }
+            if (event.type == SDL_TEXTINPUT) {
+                for (const char *p = event.text.text; *p; ++p) {
+                    const unsigned char ch = static_cast<unsigned char>(*p);
+                    if (ch >= 0x20u && ch < 0x7Fu && text_buf.size() < 48u) {
+                        text_buf.push_back(static_cast<char>(ch));
+                        err_msg.clear();
+                    }
+                }
+            }
+            if (event.type == SDL_KEYDOWN) {
+                const SDL_Keycode sym = event.key.keysym.sym;
+                if (sym == SDLK_ESCAPE) done = true;
+                else if (sym == SDLK_RETURN || sym == SDLK_KP_ENTER) try_apply();
+                else if (sym == SDLK_BACKSPACE && !text_buf.empty()) {
+                    text_buf.pop_back();
+                    err_msg.clear();
+                }
+            }
+            if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_LEFT) {
+                int mx = 0, my = 0;
+                gc_ui_map_mouse(window, w, h, event.button.x, event.button.y, mx, my);
+                if (gc_ui_inside(mx, my, apply_btn)) try_apply();
+                else if (gc_ui_inside(mx, my, cancel_btn)) done = true;
+            }
+        }
+        if (done || quit_requested) break;
+
+        int mx = 0, my = 0;
+        gc_ui_map_mouse(window, w, h, mouse_x, mouse_y, mx, my);
+
+        SDL_SetRenderDrawColor(renderer, background.r, background.g, background.b, background.a);
+        SDL_RenderClear(renderer);
+        gc_ui_fill(renderer, SDL_Rect{0, 0, w, h}, overlay_dim);
+        gc_ui_fill(renderer, modal, panel);
+        gc_ui_outline(renderer, modal, accent);
+        font.draw(modal.x + 28, modal.y + 24, title, accent, 3, 30);
+        font.draw(modal.x + 28, modal.y + 68, subtitle, muted, 2, 44);
+        gc_ui_fill(renderer, input_box, background);
+        gc_ui_outline(renderer, input_box, blue);
+        font.draw(input_box.x + 14, input_box.y + 15, text_buf + "_", ink, 2, 38);
+        if (!err_msg.empty())
+            font.draw(modal.x + 28, modal.y + 162, err_msg, warning, 1, 78);
+        gc_ui_draw_button(renderer, font, apply_btn, "CONNECT", true, true,
+                          gc_ui_inside(mx, my, apply_btn));
+        gc_ui_draw_button(renderer, font, cancel_btn, "CANCEL", true, false,
+                          gc_ui_inside(mx, my, cancel_btn));
+        gc_ui_present(renderer, vsync_active);
+    }
+
+    SDL_StopTextInput();
+    return accepted && !quit_requested;
+}
+
 void GcTopMenuBar::show_toast(const std::string& message, double duration_sec)
 {
     m_toast_text = message;
@@ -1721,11 +1858,11 @@ bool GcTopMenuBar::handle_event(const SDL_Event& event, SDL_Window *window,
                     out_action = GcMenuAction::TimingChanged;
                     break;
                 case ItemOp::ResetTiming:
-                    selection.timing.lcd_hz = 60.0;
+                    selection.timing.lcd_hz = GC_LCD_NATIVE_HZ;
                     selection.timing.cpu_speed_percent = 100u;
                     selection.timing.game_pace_percent = 100u;
                     (void)gc_save_launch_selection(selection);
-                    show_toast("TIMING RESET: 60 HZ / 100% CPU / 1.0X PACE");
+                    show_toast("TIMING RESET: 75.48 HZ HW / 100% (5.00 MHZ) / 1.0X");
                     out_action = GcMenuAction::TimingChanged;
                     break;
                 case ItemOp::SetTouchMode: {
@@ -1754,6 +1891,19 @@ bool GcTopMenuBar::handle_event(const SDL_Event& event, SDL_Window *window,
                     (void)gc_save_launch_selection(selection);
                     show_toast("AUDIO VOLUME: " + std::to_string(selection.timing.audio_volume_percent) + "%");
                     out_action = GcMenuAction::TimingChanged;
+                    break;
+                case ItemOp::SetSerialMode: {
+                    const unsigned sm = static_cast<unsigned>(std::lround(item.value));
+                    selection.serial_mode = sm == 2u ? GC_SERIAL_TCP_HOST
+                        : (sm == 1u ? GC_SERIAL_MODEM : GC_SERIAL_OFF);
+                    (void)gc_save_launch_selection(selection);
+                    out_action = GcMenuAction::SerialModeChanged;
+                    break;
+                }
+                case ItemOp::ToggleWarmBootSeed:
+                    selection.warm_boot_nvram = !selection.warm_boot_nvram;
+                    (void)gc_save_launch_selection(selection);
+                    out_action = GcMenuAction::SeedWarmBootNvram;
                     break;
                 case ItemOp::ToggleIntegerScale:
                     selection.timing.integer_scaling = !selection.timing.integer_scaling;
@@ -1981,6 +2131,19 @@ GcLaunchSelection gc_load_launch_selection()
         trim_string(value);
         if (name == "firmware_dir") selection.firmware_dir = value;
         else if (name == "cartridge_path") selection.cartridge_path = value;
+        else if (name == "cartridge2_path") selection.cartridge2_path = value;
+        else if (name == "nvram_path") selection.nvram_path = value;
+        else if (name == "warm_boot_nvram")
+            selection.warm_boot_nvram = (value == "1" || value == "true");
+        else if (name == "serial_mode") {
+            const unsigned long parsed = std::strtoul(value.c_str(), nullptr, 10);
+            selection.serial_mode = parsed == 3ul ? GC_SERIAL_TCP_CLIENT
+                : (parsed == 2ul ? GC_SERIAL_TCP_HOST
+                    : (parsed == 1ul ? GC_SERIAL_MODEM : GC_SERIAL_OFF));
+        } else if (name == "serial_endpoint" && !value.empty())
+            selection.serial_endpoint = value;
+        else if (name == "phonebook_path")
+            selection.phonebook_path = value;
         else if (name == "lcd_hz") {
             char *end = nullptr;
             const double parsed = std::strtod(value.c_str(), &end);
@@ -2021,6 +2184,11 @@ GcLaunchSelection gc_load_launch_selection()
         if (!fs::is_regular_file(selection.cartridge_path, ec) || ec)
             selection.cartridge_path.clear();
     }
+    if (!selection.cartridge2_path.empty()) {
+        std::error_code ec;
+        if (!fs::is_regular_file(selection.cartridge2_path, ec) || ec)
+            selection.cartridge2_path.clear();
+    }
     if (selection.firmware_dir.empty() && gc_ui_valid_firmware("firmware")) {
         std::error_code ec;
         const fs::path local_fw = fs::absolute("firmware", ec);
@@ -2040,6 +2208,12 @@ bool gc_save_launch_selection(const GcLaunchSelection& selection)
     output << "# Game.com launcher paths, timing, touch, audio, and view settings.\n";
     output << "firmware_dir=" << selection.firmware_dir << '\n';
     output << "cartridge_path=" << selection.cartridge_path << '\n';
+    output << "cartridge2_path=" << selection.cartridge2_path << '\n';
+    output << "nvram_path=" << selection.nvram_path << '\n';
+    output << "warm_boot_nvram=" << (selection.warm_boot_nvram ? 1 : 0) << '\n';
+    output << "serial_mode=" << static_cast<unsigned>(selection.serial_mode) << '\n';
+    output << "serial_endpoint=" << selection.serial_endpoint << '\n';
+    output << "phonebook_path=" << selection.phonebook_path << '\n';
     output << "lcd_hz=" << selection.timing.lcd_hz << '\n';
     output << "cpu_speed_percent=" << selection.timing.cpu_speed_percent << '\n';
     output << "game_pace_percent=" << selection.timing.game_pace_percent << '\n';
@@ -2049,6 +2223,11 @@ bool gc_save_launch_selection(const GcLaunchSelection& selection)
     output << "integer_scaling=" << (selection.timing.integer_scaling ? 1 : 0) << '\n';
     output << "auto_hide_menubar=" << (selection.timing.auto_hide_menubar ? 1 : 0) << '\n';
     return output.good();
+}
+
+std::string gc_default_nvram_path()
+{
+    return default_nvram_file().string();
 }
 
 bool gc_sdl_launcher_run(GcLaunchSelection& selection, GcInputBindings& bindings)

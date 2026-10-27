@@ -15,7 +15,7 @@ struct UartTransmitByte {
     uint8_t value = 0;
 };
 
-// Standalone SM8521 execution core. It uses the Game.com bus API but has no
+// Standalone SM8521 execution core. It uses the Game.com bus API and has no
 // dependency on MAME's device framework or runtime.
 class Sm8521Cpu {
 public:
@@ -24,17 +24,31 @@ public:
     void reset();
     bool step();
     bool halted() const noexcept { return m_halted != 0; }
+    bool stopped() const noexcept { return m_stopped != 0; }
+    void set_stop_mode_enabled(bool enabled) noexcept { m_stop_mode_enabled = enabled; }
+    bool stop_mode_enabled() const noexcept { return m_stop_mode_enabled; }
+    void clear_stop() noexcept { m_stopped = 0; m_machine.cpu.stopped = false; }
+    void set_rtc_sync(bool enabled) noexcept { m_rtc_sync_enabled = enabled; }
+    bool rtc_sync() const noexcept { return m_rtc_sync_enabled; }
+    void set_rtc_override(uint8_t year, uint8_t month, uint8_t day,
+                          uint8_t hour, uint8_t minute, uint8_t second) noexcept;
+    void clear_rtc_override() noexcept { m_rtc_override_valid = false; }
     uint16_t pc() const noexcept { return m_PC; }
     uint64_t cycles() const noexcept { return m_cycles; }
     uint64_t instructions() const noexcept { return m_instructions; }
     uint64_t dma_transfers() const noexcept { return m_dma_transfers; }
     uint64_t clock_ticks() const noexcept { return m_clock_ticks; }
     uint64_t vblank_ticks() const noexcept { return m_vblank_ticks; }
+    unsigned cpu_prescale() const noexcept { return m_cpu_prescale; }
     const std::vector<SoundRegisterWrite>& sound_writes() const noexcept { return m_sound_writes; }
     void clear_sound_writes() noexcept { m_sound_writes.clear(); }
     const std::vector<UartTransmitByte>& uart_transmits() const noexcept { return m_uart_transmits; }
     void clear_uart_transmits() noexcept { m_uart_transmits.clear(); }
     bool queue_uart_receive(uint8_t value);
+    bool uart_rx_idle() const noexcept
+    {
+        return !m_uart_rx_active && m_uart_rx_queue.empty() && (m_uart_status & 0x01u) == 0u;
+    }
     void resume() noexcept { m_halted = 0; }
     void set_external_vblank(bool enabled) noexcept { m_external_vblank = enabled; }
     bool external_vblank() const noexcept { return m_external_vblank; }
@@ -60,21 +74,26 @@ private:
     void mem_writeword(uint32_t address, uint16_t value);
     void load_sfr_state();
     void get_sp();
+    void commit_ckc_prescale() noexcept;
+    void seed_host_rtc_mirror() noexcept;
+    void update_lcv_status() noexcept;
     void process_interrupts();
     void take_interrupt(uint16_t vector);
     void request_interrupt(unsigned line);
     void advance_devices(unsigned cycles);
+    void advance_cycles_chunked(uint64_t total_cycles);
     void advance_uart();
     void uart_write_data(uint8_t value);
     void uart_write_control(uint8_t value);
     uint8_t uart_read_register(uint8_t address);
     uint64_t uart_frame_cycles() const noexcept;
     void start_uart_tx();
-    void perform_dma();
+    uint64_t perform_dma();
 
     struct TimerState {
         bool enabled = false;
-        uint8_t upcounter_max = 0;
+        uint8_t reload = 0;
+        uint8_t counter = 0;
         uint64_t prescale_count = 0;
         uint32_t prescale_max = 1;
     };
@@ -86,17 +105,27 @@ private:
     uint8_t m_CKC = 0;
     uint8_t m_PS0 = 0;
     uint8_t m_PS1 = 0;
+    uint8_t m_lcv_cfg = 0x27;
     uint8_t m_clock_changed = 0;
     uint8_t m_halted = 0;
+    uint8_t m_stopped = 0;
+    bool m_stop_mode_enabled = false;
+    bool m_rtc_sync_enabled = true;
+    bool m_rtc_seeded = false;
+    bool m_rtc_override_valid = false;
+    uint8_t m_rtc_override[6]{};
+    unsigned m_cpu_prescale = 1;
     uint8_t m_register_ram[0x108]{};
     uint16_t m_IFLAGS = 0;
-    bool m_check_interrupts = false;
+    bool m_dma_wake_pending = false;
+    bool m_irq_defer_one = false;
     TimerState m_timers[2]{};
     uint32_t m_cpu_hz = GC_CPU_HZ;
     bool m_external_vblank = false;
-    uint64_t m_next_vblank = 92573; /* MAME's ~59.732 Hz screen timing, in CPU cycles. */
+    uint64_t m_next_vblank = GC_LCD_NATIVE_CYCLES; /* 320 * 207 = 66,240 phi0 cycles (~75.483 Hz). */
+    uint64_t m_vblank_end_cycle = 0;
     uint64_t m_next_clock_tick = 0;
-    uint64_t m_clock_tick_period = 5529600;
+    uint64_t m_clock_tick_period = GC_CPU_HZ;
     uint64_t m_cycles = 0;
     uint64_t m_instructions = 0;
     uint64_t m_dma_transfers = 0;

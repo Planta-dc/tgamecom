@@ -19,20 +19,66 @@ static uint8_t *reg_ptr(GcMachine *m, uint16_t address)
 
 static uint8_t read_mapped_bank(const GcMachine *m, unsigned window, unsigned offset)
 {
-    const size_t physical = (size_t)m->bus.mapped_bank[window] * 0x2000u + offset;
-    if (m->bus.mapped_is_cart[window]) return m->bus.rom[physical];
-    return m->bus.system_rom[physical];
+    const uint8_t bank = m->bus.mapped_bank[window];
+    const size_t physical = (size_t)bank * 0x2000u + offset;
+    if (bank < 0x20u) return m->bus.system_rom[physical];
+    if (!m->bus.cart_active) return 0xFFu; /* Open-bus pull-up when no populated cart slot is selected. */
+    if (m->bus.active_slot == 2u) return m->bus.rom2[physical];
+    return m->bus.rom[physical];
 }
 
 static void update_mmu_mapping(GcMachine *m, unsigned window, uint8_t bank)
 {
     if (window >= 5u) return;
-    if (bank < 0x20u) {
-        m->bus.mapped_bank[window] = bank;
-        m->bus.mapped_is_cart[window] = false;
-    } else if (m->bus.cart_active) {
-        m->bus.mapped_bank[window] = bank;
-        m->bus.mapped_is_cart[window] = true;
+    /* Hardware latches MMU0-MMU4 unconditionally; BIOS wrappers rely on cart-range
+       bank numbers latching even before P3[7:6] selects a cartridge slot. */
+    m->bus.mapped_bank[window] = bank;
+    m->bus.mapped_is_cart[window] = (bank >= 0x20u);
+}
+
+static uint8_t port_output_mask(uint8_t port_ctl)
+{
+    uint8_t mask = 0;
+    if (port_ctl & 0x80u) mask |= 0xC0u;
+    if (port_ctl & 0x20u) mask |= 0x30u;
+    if (port_ctl & 0x08u) mask |= 0x0Cu;
+    if (port_ctl & 0x02u) mask |= 0x03u;
+    return mask;
+}
+
+static uint8_t resolve_scan_port(const GcMachine *m, unsigned port_idx)
+{
+    const uint8_t latch = m->bus.pio_output_latch[port_idx];
+    const uint8_t ctl = m->bus.reg_file[0x20u + port_idx];
+    if (ctl == 0u) return latch;
+    const uint8_t out_mask = port_output_mask(ctl);
+    return (uint8_t)((latch & out_mask) | (uint8_t)~out_mask);
+}
+
+static void update_p3_state(GcMachine *m)
+{
+    const uint8_t latch = m->bus.pio_output_latch[3];
+    const uint8_t p3c = m->bus.reg_file[0x23];
+    const uint8_t out_mask = port_output_mask(p3c);
+    uint8_t ext_pins = 0xFFu;
+    if (!m->bus.serial_dsr) ext_pins &= (uint8_t)~0x08u; /* P3[3] = UART DSR */
+    if (!m->bus.serial_cts) ext_pins &= (uint8_t)~0x04u; /* P3[2] = UART CTS */
+
+    m->bus.reg_file[0x17] = (uint8_t)((latch & out_mask) | (ext_pins & (uint8_t)~out_mask));
+    m->bus.serial_dtr = (p3c & 0x02u) ? ((latch & 0x01u) != 0) : true;
+    m->bus.serial_rts = (p3c & 0x02u) ? ((latch & 0x02u) != 0) : true;
+
+    /* Cartridge slot decoder follows the P3[7:6] latch (01 = slot 1, 10 = slot 2). */
+    const uint8_t slot_bits = (uint8_t)(latch & 0xC0u);
+    if (slot_bits == 0x40u) {
+        m->bus.active_slot = 1u;
+        m->bus.cart_active = m->bus.cart_present;
+    } else if (slot_bits == 0x80u) {
+        m->bus.active_slot = 2u;
+        m->bus.cart_active = m->bus.cart2_present;
+    } else {
+        m->bus.active_slot = 0u;
+        m->bus.cart_active = false;
     }
 }
 
@@ -43,17 +89,25 @@ static const uint16_t k_touch_mux[13] = {
 
 static void update_pio_input_matrix(GcMachine *m, bool cpu_strobe)
 {
-    const uint16_t mux = (uint16_t)(m->bus.pio_output_latch[1] |
-                                    ((uint16_t)m->bus.pio_output_latch[2] << 8));
+    const uint8_t p0_base = resolve_scan_port(m, 0u);
+    const uint8_t p1_scan = resolve_scan_port(m, 1u);
+    const uint8_t p2_scan = resolve_scan_port(m, 2u);
+    const uint16_t mux = (uint16_t)((p1_scan & 0xFCu) | 0x03u | ((uint16_t)p2_scan << 8));
+
     if (mux == 0x7FFFu) { /* Buttons: arrows/menu/pause/sound/A, then B/C. */
-        m->bus.reg_file[0x14] = m->bus.input_buttons[0];
-        m->bus.reg_file[0x15] = (uint8_t)((m->bus.pio_output_latch[1] & 0xFCu) |
-                                          (m->bus.input_buttons[1] & 0x03u));
+        m->bus.pio_input_hold[0] = (uint8_t)(p0_base & m->bus.input_buttons[0]);
+        m->bus.pio_input_hold[1] = (uint8_t)((p1_scan & 0xFCu) |
+                                             (p1_scan & m->bus.input_buttons[1] & 0x03u));
+        m->bus.reg_file[0x14] = m->bus.pio_input_hold[0];
+        m->bus.reg_file[0x15] = m->bus.pio_input_hold[1];
         return;
     }
-    if (mux == 0xFFFFu) { /* Power/reset and button D. */
-        m->bus.reg_file[0x14] = (uint8_t)(0xFCu | (m->bus.input_buttons[2] & 0x03u));
-        m->bus.reg_file[0x15] = 0xFF;
+    if (mux == 0xFFFFu) { /* Power/reset and button D; P0[7:2] retain previous hold state. */
+        m->bus.pio_input_hold[0] = (uint8_t)((m->bus.pio_input_hold[0] & 0xFCu) |
+                                             (p0_base & m->bus.input_buttons[2] & 0x03u));
+        m->bus.pio_input_hold[1] = 0xFFu;
+        m->bus.reg_file[0x14] = m->bus.pio_input_hold[0];
+        m->bus.reg_file[0x15] = m->bus.pio_input_hold[1];
         return;
     }
     for (unsigned column = 0; column < 13u; ++column) {
@@ -64,11 +118,16 @@ static void update_pio_input_matrix(GcMachine *m, bool cpu_strobe)
             if (cpu_strobe) m->bus.touch_strobed = true;
         }
         const uint16_t stylus_y = (uint16_t)(touched_rows ^ 0x03FFu);
-        m->bus.reg_file[0x14] = (uint8_t)stylus_y;
-        m->bus.reg_file[0x15] = (uint8_t)((m->bus.pio_output_latch[1] & 0xFCu) |
-                                          ((stylus_y >> 8) & 0x03u));
+        m->bus.pio_input_hold[0] = (uint8_t)(p0_base & (uint8_t)stylus_y);
+        m->bus.pio_input_hold[1] = (uint8_t)((p1_scan & 0xFCu) |
+                                             (p1_scan & ((stylus_y >> 8) & 0x03u)));
+        m->bus.reg_file[0x14] = m->bus.pio_input_hold[0];
+        m->bus.reg_file[0x15] = m->bus.pio_input_hold[1];
         return;
     }
+    /* Unrecognized transient P1/P2 selector: preserve previous sampled P0/P1 hold state. */
+    m->bus.reg_file[0x14] = m->bus.pio_input_hold[0];
+    m->bus.reg_file[0x15] = m->bus.pio_input_hold[1];
 }
 
 void gc_input_set_button(GcMachine *machine, GcButton button, bool down)
@@ -108,14 +167,33 @@ bool gc_input_set_touch(GcMachine *machine, bool down, unsigned column, unsigned
     return true;
 }
 
+void gc_serial_set_inputs(GcMachine *machine, bool cts, bool dsr)
+{
+    if (!machine) return;
+    machine->bus.serial_cts = cts;
+    machine->bus.serial_dsr = dsr;
+    update_p3_state(machine);
+}
+
+bool gc_serial_dtr(const GcMachine *machine)
+{
+    return machine ? machine->bus.serial_dtr : true;
+}
+
+bool gc_serial_rts(const GcMachine *machine)
+{
+    return machine ? machine->bus.serial_rts : true;
+}
+
 static uint8_t raw_map_read(GcMachine *m, uint16_t address, bool debugger_view)
 {
     if (m->bus.patch_valid[address]) return m->bus.patch[address];
     if (address < 0x400u) {
         if (!debugger_view && (address == 0x14u || address == 0x15u) &&
             m->bus.touch_active && m->bus.touch_column < 13u) {
-            const uint16_t mux = (uint16_t)(m->bus.pio_output_latch[1] |
-                                            ((uint16_t)m->bus.pio_output_latch[2] << 8));
+            const uint8_t p1_scan = resolve_scan_port(m, 1u);
+            const uint8_t p2_scan = resolve_scan_port(m, 2u);
+            const uint16_t mux = (uint16_t)((p1_scan & 0xFCu) | 0x03u | ((uint16_t)p2_scan << 8));
             if (mux == k_touch_mux[m->bus.touch_column])
                 m->bus.touch_strobed = true;
         }
@@ -144,6 +222,7 @@ void gc_machine_init(GcMachine *machine)
 {
     memset(machine, 0, sizeof(*machine));
     memset(machine->bus.rom, 0xFF, sizeof(machine->bus.rom));
+    memset(machine->bus.rom2, 0xFF, sizeof(machine->bus.rom2));
     memset(machine->bus.system_rom, 0xFF, sizeof(machine->bus.system_rom));
     memset(machine->bus.boot_rom, 0xFF, sizeof(machine->bus.boot_rom));
     gc_machine_reset(machine);
@@ -161,11 +240,17 @@ void gc_machine_reset(GcMachine *machine)
     machine->bus.pio_output_latch[1] = 0xFF;
     machine->bus.pio_output_latch[2] = 0xFF;
     machine->bus.pio_output_latch[3] = 0x00;
+    machine->bus.pio_input_hold[0] = 0xFF;
+    machine->bus.pio_input_hold[1] = 0xFF;
     memset(machine->bus.input_buttons, 0xFF, sizeof(machine->bus.input_buttons));
     machine->bus.touch_active = false;
     machine->bus.touch_strobed = false;
     machine->bus.touch_column = 0;
     machine->bus.touch_row = 0;
+    machine->bus.serial_cts = true;
+    machine->bus.serial_dsr = true;
+    machine->bus.serial_dtr = true;
+    machine->bus.serial_rts = true;
     machine->bus.reg_file[0x30] = 0xB0; /* LCDC reset defaults from MAME reference. */
     machine->bus.reg_file[0x31] = 0x07; /* LCH: default 200-dot timing. */
     machine->bus.reg_file[0x32] = 0x27; /* LCV: default visible/blank timing. */
@@ -177,8 +262,10 @@ void gc_machine_reset(GcMachine *machine)
     machine->bus.reg_file[0x5F] = 0x38;
     machine->bus.boot_enabled = true;
     machine->bus.cart_active = false;
+    machine->bus.active_slot = 0u;
     memset(machine->bus.mapped_bank, 0, sizeof(machine->bus.mapped_bank));
     memset(machine->bus.mapped_is_cart, 0, sizeof(machine->bus.mapped_is_cart));
+    update_p3_state(machine);
     machine->bus.watch_hit = false;
     machine->cpu.pc = 0x1020u;
 }
@@ -211,8 +298,11 @@ void gc_bus_write(GcMachine *machine, uint16_t address, uint8_t value)
             else if (address == 0x15u || address == 0x16u)
                 update_pio_input_matrix(machine, true);
             else if (address == 0x17u)
-                machine->bus.cart_active = machine->bus.cart_present &&
-                    (((value & 0xC0u) == 0x40u) || ((value & 0xC0u) == 0x80u));
+                update_p3_state(machine);
+        } else if (address >= 0x20u && address <= 0x22u) {
+            update_pio_input_matrix(machine, false);
+        } else if (address == 0x23u) {
+            update_p3_state(machine);
         }
     } else if (address >= 0xA000u && address < 0xE000u) {
         machine->bus.vram[address - 0xA000u] = value;
@@ -501,6 +591,9 @@ GcStepResult gc_cpu_step(GcMachine *machine)
     case 0x58: /* MOV register-file,#imm */
         b = fetch8(machine); a = fetch8(machine); gc_bus_write(machine, a, b); spent = 6;
         break;
+    case 0x98: /* JMP/BR T,ad16 */
+        machine->cpu.pc = fetch16be(machine); spent = 6;
+        break;
     case 0xF0: machine->cpu.stopped = true; spent = 2; break;
     case 0xF1: machine->cpu.halted = true; spent = 2; break;
     case 0xF8: { /* RET; stack byte order follows the MAME reference core. */
@@ -646,17 +739,38 @@ static bool load_into_array(const char *path, uint8_t *dst, size_t capacity,
     return true;
 }
 
-bool gc_load_cartridge(GcMachine *machine, const char *path, char *error, size_t error_size)
+void gc_unload_cartridge_slot(GcMachine *machine, unsigned slot)
+{
+    if (!machine || (slot != 1u && slot != 2u)) return;
+    if (slot == 1u) {
+        memset(machine->bus.rom, 0xFF, sizeof(machine->bus.rom));
+        machine->bus.cart_present = false;
+    } else {
+        memset(machine->bus.rom2, 0xFF, sizeof(machine->bus.rom2));
+        machine->bus.cart2_present = false;
+    }
+    update_p3_state(machine);
+}
+
+bool gc_load_cartridge_slot(GcMachine *machine, unsigned slot, const char *path,
+                            char *error, size_t error_size)
 {
     static const size_t supported_sizes[] = {
         0x008000u, 0x040000u, 0x080000u, 0x100000u, 0x1C0000u, 0x200000u
     };
-    memset(machine->bus.rom, 0xFF, sizeof(machine->bus.rom));
-    machine->bus.cart_present = false;
-    machine->bus.cart_active = false;
+    if (!machine || (slot != 1u && slot != 2u)) {
+        set_error(error, error_size, "invalid cartridge slot (expected 1 or 2)");
+        return false;
+    }
+    uint8_t *rom_buf = (slot == 2u) ? machine->bus.rom2 : machine->bus.rom;
+    bool *present_flag = (slot == 2u) ? &machine->bus.cart2_present : &machine->bus.cart_present;
+    memset(rom_buf, 0xFF, GC_ROM_SIZE);
+    *present_flag = false;
+    update_p3_state(machine);
+
     FILE *f = fopen(path, "rb");
     if (!f) { set_error(error, error_size, "could not open raw cartridge image"); return false; }
-    size_t n = fread(machine->bus.rom, 1, sizeof(machine->bus.rom), f);
+    size_t n = fread(rom_buf, 1, GC_ROM_SIZE, f);
     int extra = fgetc(f);
     const bool io_error = ferror(f) != 0;
     fclose(f);
@@ -674,18 +788,24 @@ bool gc_load_cartridge(GcMachine *machine, const char *path, char *error, size_t
     }
 
     if (n == 0x1C0000u) {
-        memmove(machine->bus.rom + 0x40000u, machine->bus.rom, n);
+        memmove(rom_buf + 0x40000u, rom_buf, n);
     } else {
-        if (n < 0x010000u) memcpy(machine->bus.rom + 0x008000u, machine->bus.rom, 0x008000u);
-        if (n < 0x020000u) memcpy(machine->bus.rom + 0x010000u, machine->bus.rom, 0x010000u);
-        if (n < 0x040000u) memcpy(machine->bus.rom + 0x020000u, machine->bus.rom, 0x020000u);
-        if (n < 0x080000u) memcpy(machine->bus.rom + 0x040000u, machine->bus.rom, 0x040000u);
-        if (n < 0x100000u) memcpy(machine->bus.rom + 0x080000u, machine->bus.rom, 0x080000u);
-        if (n < 0x1C0000u) memcpy(machine->bus.rom + 0x100000u, machine->bus.rom, 0x100000u);
+        if (n < 0x010000u) memcpy(rom_buf + 0x008000u, rom_buf, 0x008000u);
+        if (n < 0x020000u) memcpy(rom_buf + 0x010000u, rom_buf, 0x010000u);
+        if (n < 0x040000u) memcpy(rom_buf + 0x020000u, rom_buf, 0x020000u);
+        if (n < 0x080000u) memcpy(rom_buf + 0x040000u, rom_buf, 0x040000u);
+        if (n < 0x100000u) memcpy(rom_buf + 0x080000u, rom_buf, 0x080000u);
+        if (n < 0x1C0000u) memcpy(rom_buf + 0x100000u, rom_buf, 0x100000u);
     }
-    machine->bus.cart_present = true;
+    *present_flag = true;
+    update_p3_state(machine);
     if (error && error_size) error[0] = '\0';
     return true;
+}
+
+bool gc_load_cartridge(GcMachine *machine, const char *path, char *error, size_t error_size)
+{
+    return gc_load_cartridge_slot(machine, 1u, path, error, error_size);
 }
 
 bool gc_load_system_rom(GcMachine *machine, const char *path, char *error, size_t error_size)
@@ -698,9 +818,140 @@ bool gc_load_boot_rom(GcMachine *machine, const char *path, char *error, size_t 
     return load_into_array(path, machine->bus.boot_rom, sizeof(machine->bus.boot_rom), true, error, error_size);
 }
 
+void gc_synthesize_boot_rom(GcMachine *machine)
+{
+    if (!machine) return;
+    uint8_t *rom = machine->bus.boot_rom;
+    memset(rom, 0xFF, GC_BOOT_SIZE);
+
+    /* Clean-room SM8521 internal boot handoff at 0x1000..0x1FFF:
+       1. Hardware interrupt vectors (0x1000..0x101F) forward active SM8521
+          sources to external system ROM bank 2's jump table (0x2039..0x2051),
+          while unused vector slots point to an IRET stub at 0x10A0.
+       2. Reset entry (0x1020) initializes core SFRs/SP, maps external BIOS
+          banks (MMU1=2, MMU2=4, MMU4=3), and branches to external BIOS 0x2054. */
+    static const struct { uint8_t vec_offset; uint16_t ext_target; } k_vectors[9] = {
+        { 0x02u, 0x2039u }, /* DMA */
+        { 0x06u, 0x203Cu }, /* TIM0 */
+        { 0x08u, 0x203Fu }, /* EXT */
+        { 0x0Eu, 0x2042u }, /* LCDC */
+        { 0x12u, 0x2045u }, /* TIM1 */
+        { 0x16u, 0x2048u }, /* UART */
+        { 0x1Au, 0x204Bu }, /* PIO */
+        { 0x1Cu, 0x204Eu }, /* WDT */
+        { 0x1Eu, 0x2051u }  /* NMI / CLKT */
+    };
+    const uint16_t iret_stub = 0x10A0u;
+    for (unsigned off = 0; off < 0x20u; off += 2u) {
+        rom[off] = (uint8_t)(iret_stub >> 8);
+        rom[off + 1u] = (uint8_t)(iret_stub & 0xFFu);
+    }
+    uint16_t tramp = 0x1080u;
+    for (unsigned i = 0; i < 9u; ++i) {
+        const uint8_t vo = k_vectors[i].vec_offset;
+        rom[vo] = (uint8_t)(tramp >> 8);
+        rom[vo + 1u] = (uint8_t)(tramp & 0xFFu);
+        rom[tramp - 0x1000u + 0u] = 0x98u; /* BR ext_target */
+        rom[tramp - 0x1000u + 1u] = (uint8_t)(k_vectors[i].ext_target >> 8);
+        rom[tramp - 0x1000u + 2u] = (uint8_t)(k_vectors[i].ext_target & 0xFFu);
+        tramp = (uint16_t)(tramp + 3u);
+    }
+    rom[iret_stub - 0x1000u] = 0xF9u; /* IRET */
+
+    static const uint8_t k_reset_code[] = {
+        0xFEu,                   /* DI */
+        0x58u, 0x00u, 0x10u,     /* MOV IE0, #0x00 */
+        0x58u, 0x00u, 0x11u,     /* MOV IE1, #0x00 */
+        0x58u, 0x00u, 0x1Eu,     /* MOV PS0, #0x00 */
+        0x58u, 0x00u, 0x1Fu,     /* MOV PS1, #0x00 */
+        0x58u, 0x00u, 0x20u,     /* MOV P0C, #0x00 */
+        0x58u, 0x46u, 0x19u,     /* MOV SYS, #0x46 */
+        0x58u, 0x03u, 0x1Cu,     /* MOV SPH, #0x03 */
+        0x58u, 0xC0u, 0x1Du,     /* MOV SPL, #0xC0 */
+        0x58u, 0x02u, 0x25u,     /* MOV MMU1, #0x02 */
+        0x58u, 0x04u, 0x26u,     /* MOV MMU2, #0x04 */
+        0x58u, 0x03u, 0x28u,     /* MOV MMU4, #0x03 */
+        0x98u, 0x20u, 0x54u      /* BR 0x2054 */
+    };
+    memcpy(rom + 0x20u, k_reset_code, sizeof(k_reset_code));
+}
+
 bool gc_load_firmware(GcMachine *machine, const char *internal_path,
                       const char *external_path, char *error, size_t error_size)
 {
-    if (!gc_load_boot_rom(machine, internal_path, error, error_size)) return false;
+    if (internal_path && internal_path[0] != '\0') {
+        if (!gc_load_boot_rom(machine, internal_path, error, error_size)) return false;
+    } else {
+        gc_synthesize_boot_rom(machine);
+    }
     return gc_load_system_rom(machine, external_path, error, error_size);
+}
+
+void gc_nvram_clear(GcMachine *machine)
+{
+    if (!machine) return;
+    memset(machine->bus.ext_ram, 0x00, sizeof(machine->bus.ext_ram));
+    memset(machine->bus.ext_io, 0x00, sizeof(machine->bus.ext_io));
+}
+
+void gc_nvram_seed_warm_boot(GcMachine *machine)
+{
+    if (!machine) return;
+    /* BIOS warm-boot signature at 0xFEE2..0xFEE7 (ext_ram[0x1EE2..0x1EE7]). */
+    static const uint8_t k_warm_tuple[6] = { 0x01u, 0x09u, 0x09u, 0x07u, 0x00u, 0x04u };
+    memcpy(machine->bus.ext_ram + 0x1EE2u, k_warm_tuple, sizeof(k_warm_tuple));
+}
+
+bool gc_nvram_load(GcMachine *machine, const char *path, char *error, size_t error_size)
+{
+    if (!machine || !path || !path[0]) {
+        set_error(error, error_size, "invalid NVRAM path");
+        return false;
+    }
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        set_error(error, error_size, "could not open NVRAM image");
+        return false;
+    }
+    uint8_t buf[GC_NVRAM_SIZE];
+    memset(buf, 0x00, sizeof(buf));
+    const size_t n = fread(buf, 1, sizeof(buf), f);
+    const int extra = fgetc(f);
+    const bool io_err = ferror(f) != 0;
+    fclose(f);
+    if (io_err || extra != EOF || (n != GC_NVRAM_SIZE && n != GC_EXT_RAM_SIZE)) {
+        set_error(error, error_size, "NVRAM image must be 8192 (or 7936) bytes");
+        return false;
+    }
+    memcpy(machine->bus.ext_ram, buf, GC_EXT_RAM_SIZE);
+    if (n == GC_NVRAM_SIZE)
+        memcpy(machine->bus.ext_io, buf + GC_EXT_RAM_SIZE, sizeof(machine->bus.ext_io));
+    else
+        memset(machine->bus.ext_io, 0x00, sizeof(machine->bus.ext_io));
+    if (error && error_size) error[0] = '\0';
+    return true;
+}
+
+bool gc_nvram_save(const GcMachine *machine, const char *path, char *error, size_t error_size)
+{
+    if (!machine || !path || !path[0]) {
+        set_error(error, error_size, "invalid NVRAM path");
+        return false;
+    }
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        set_error(error, error_size, "could not write NVRAM image");
+        return false;
+    }
+    const size_t n1 = fwrite(machine->bus.ext_ram, 1, sizeof(machine->bus.ext_ram), f);
+    const size_t n2 = fwrite(machine->bus.ext_io, 1, sizeof(machine->bus.ext_io), f);
+    const bool ok = (n1 == sizeof(machine->bus.ext_ram)) &&
+                    (n2 == sizeof(machine->bus.ext_io)) && (fflush(f) == 0);
+    fclose(f);
+    if (!ok) {
+        set_error(error, error_size, "failed writing 8 KiB NVRAM image");
+        return false;
+    }
+    if (error && error_size) error[0] = '\0';
+    return true;
 }

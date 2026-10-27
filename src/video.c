@@ -30,6 +30,7 @@ bool gc_lcd_render_argb(const GcMachine *machine, uint32_t *pixels,
     const uint8_t lcdc = machine->bus.reg_file[0x30];
     const size_t page_base = (lcdc & 0x40u) ? 0x2000u : 0u;
     const bool display_enabled = (lcdc & 0x80u) != 0;
+    const bool normal_black = (lcdc & 0x01u) != 0;
     const unsigned palette = (lcdc >> 4) & 3u;
 
     for (unsigned y = 0; y < GC_LCD_HEIGHT; ++y) {
@@ -37,13 +38,16 @@ bool gc_lcd_render_argb(const GcMachine *machine, uint32_t *pixels,
         for (unsigned x = 0; x < GC_LCD_WIDTH; ++x) {
             uint32_t color = lcd_palette[0];
             if (display_enabled) {
-                /* Each VRAM byte stores four vertical 2-bit dots. The 200
-                   horizontal columns each occupy 40 bytes, as in MAME's
-                   gamecom_scanline() implementation. */
+                /* Each VRAM byte stores four vertical 2-bit dots. Game.com's
+                   fixed 200x160 panel scans 40 bytes per column inside the
+                   selected 8 KiB VRAM page; LCC[0] flips panel rest polarity
+                   by mirroring the 5-pen gradation ladder around pen 2. */
                 const size_t address = page_base + (size_t)x * 40u + (y >> 2);
                 const uint8_t packed = machine->bus.vram[address];
                 const unsigned dot = (packed >> (6u - 2u * (y & 3u))) & 3u;
-                color = lcd_palette[palette_map[palette][dot]];
+                unsigned pen = palette_map[palette][dot];
+                if (normal_black) pen = 4u - pen;
+                color = lcd_palette[pen];
             }
             row[x] = color;
         }

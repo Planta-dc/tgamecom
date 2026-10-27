@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <array>
+#include <filesystem>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -151,13 +152,25 @@ int main(int argc, char **argv)
 
     int optional_arg = 4;
     const char *frame_path = nullptr;
+    const char *rom2_path = nullptr;
+    const char *nvram_path = nullptr;
+    bool warm_boot = false;
     if (optional_arg < argc && argv[optional_arg][0] != '-')
         frame_path = argv[optional_arg++];
     std::vector<TouchEvent> touch_events;
     std::vector<ButtonEvent> button_events;
     while (optional_arg < argc) {
         const std::string option(argv[optional_arg]);
-        if (option == "--touch" && argc - optional_arg >= 5) {
+        if (option == "--rom2" && argc - optional_arg >= 2) {
+            rom2_path = argv[optional_arg + 1];
+            optional_arg += 2;
+        } else if (option == "--nvram" && argc - optional_arg >= 2) {
+            nvram_path = argv[optional_arg + 1];
+            optional_arg += 2;
+        } else if (option == "--warm-boot") {
+            warm_boot = true;
+            ++optional_arg;
+        } else if (option == "--touch" && argc - optional_arg >= 5) {
             TouchEvent event;
             std::uint64_t column = 0, row = 0;
             if (!parse_decimal_u64(argv[optional_arg + 1], event.start) ||
@@ -218,19 +231,39 @@ int main(int argc, char **argv)
     }
     gc_machine_init(machine.get());
 
-    const std::string internal_path = join_path(argv[1], "internal.bin");
-    const std::string external_path = join_path(argv[1], "external.bin");
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const std::string internal_candidate = join_path(argv[1], "internal.bin");
+    const bool has_internal = fs::is_regular_file(internal_candidate, ec) && !ec;
+    std::string external_path = join_path(argv[1], "external.bin");
+    if (!fs::is_regular_file(external_path, ec) || ec) {
+        const std::string boot_alias = join_path(argv[1], "boot.rom");
+        if (fs::is_regular_file(boot_alias, ec) && !ec) external_path = boot_alias;
+    }
     char error[160] = {};
-    if (!gc_load_firmware(machine.get(), internal_path.c_str(), external_path.c_str(),
-                          error, sizeof(error))) {
+    if (!gc_load_firmware(machine.get(),
+                          has_internal ? internal_candidate.c_str() : nullptr,
+                          external_path.c_str(), error, sizeof(error))) {
         std::cerr << "Firmware load failed: " << error << '\n';
         return 1;
     }
     if (argc >= 3 && std::string(argv[2]) != "-" &&
-        !gc_load_cartridge(machine.get(), argv[2], error, sizeof(error))) {
+        !gc_load_cartridge_slot(machine.get(), 1u, argv[2], error, sizeof(error))) {
         std::cerr << "Cartridge load failed: " << error << '\n';
         return 1;
     }
+    if (rom2_path && std::string(rom2_path) != "-" &&
+        !gc_load_cartridge_slot(machine.get(), 2u, rom2_path, error, sizeof(error))) {
+        std::cerr << "Slot 2 cartridge load failed: " << error << '\n';
+        return 1;
+    }
+    if (nvram_path && fs::is_regular_file(nvram_path, ec) && !ec) {
+        if (!gc_nvram_load(machine.get(), nvram_path, error, sizeof(error))) {
+            std::cerr << "NVRAM load failed: " << error << '\n';
+            return 1;
+        }
+    }
+    if (warm_boot) gc_nvram_seed_warm_boot(machine.get());
 
     gc_machine_reset(machine.get());
     standalone::Sm8521Cpu cpu(*machine);
@@ -359,6 +392,10 @@ int main(int argc, char **argv)
     std::cout << "Caveat: frame-level LCD rendering, basic controller/touch-matrix input, and preliminary"
                  " sound synthesis are implemented; scanline timing/races, physical touch mapping, and"
                  " retail audio fidelity remain unverified. A short scripted playfield frame is not proof of full compatibility.\n";
+    if (nvram_path && !gc_nvram_save(machine.get(), nvram_path, error, sizeof(error))) {
+        std::cerr << "Could not save NVRAM image: " << error << '\n';
+        return 1;
+    }
     if (frame_path) {
         if (save_frame_ppm(frame_path, *machine))
             std::cout << "Wrote LCD frame: " << frame_path << '\n';

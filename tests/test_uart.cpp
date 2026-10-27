@@ -36,17 +36,17 @@ int main()
     assert(Access::read(cpu, 0x2E) == 0);
     assert(!cpu.queue_uart_receive('X')); // Receiver is disabled.
 
-    // Timer 0 input divided by the configured counter and then by the UART's
-    // fixed factor of 32. With prescale 1 and TM0D=18 this is 9600 baud at
-    // the emulator's 5.5296 MHz CPU clock.
+    // Hardware UART baud: Timer 0 output toggles each compare (2x) and divides by 32
+    // -> 64 * steps * prescaler phi0 ticks per bit. At 5.000 MHz phi0, prescale 1
+    // (TM0C=0x80) and TM0D=8 gives 512 ticks/bit (~9765.6 baud, Game.com 9600-baud mode).
     Access::write(cpu, 0x50, 0x80);
-    Access::write(cpu, 0x51, 18);
-    Access::write(cpu, 0x2E, 0x1C); // TE + RE + no parity, one stop bit.
+    Access::write(cpu, 0x51, 8);
+    Access::write(cpu, 0x2E, 0x1C); // TE + RE + no parity, one stop bit (10 bits/frame).
     Access::write(cpu, 0x2B, 'A');
     assert((Access::read(cpu, 0x2D) & 0x02u) == 0); // TDRE clears on write.
     assert(cpu.uart_transmits().empty());
 
-    constexpr uint64_t frame_cycles = 18u * 32u * 10u;
+    constexpr uint64_t frame_cycles = 8ull * 64ull * 10ull; // 5120 phi0 cycles
     Access::advance(cpu, frame_cycles - 1);
     assert(cpu.uart_transmits().empty());
     Access::advance(cpu, 1);
@@ -94,6 +94,6 @@ int main()
     assert(cpu.sound_writes().empty());
 
     std::free(machine);
-    std::cout << "SM8521 UART tests passed (registers, 9600-baud timing, RX/TX, overrun, PS0 isolation).\n";
+    std::cout << "SM8521 UART tests passed (registers, 5 MHz 64x baud timing, RX/TX, overrun, PS0 isolation).\n";
     return 0;
 }
