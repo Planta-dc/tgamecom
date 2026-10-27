@@ -2,11 +2,11 @@
 
 ## Goal
 
-Build a standalone Game.com emulator with its own portable CPU, bus/MMU, firmware and cartridge loaders, peripherals, SDL2-capable display/input, and audio. The finished emulator must not link to, launch, or require MAME. MAME is a coding reference only; the standalone SM8521 CPU operation table in this project is adapted from MAME's BSD-3-Clause source and retains its attribution/license notice.
+Build a clean-room, hardware-accurate standalone Tiger Game.com emulator with its own portable Sharp SM8521 CPU, bus/MMU, firmware and dual-slot cartridge loaders, peripherals, SDL2 display/input frontend, audio synthesizer, and online serial/modem link. The emulator contains no MAME code and does not link to, launch, or require MAME.
 
 ## Current status
 
-The project has a standalone C++ SM8521 interpreter, a separate bus model, reset/boot-ROM overlay (with a clean-room built-in handoff so `internal.bin` is optional when `external.bin` / `boot.rom` is present), external firmware and dual-slot cartridge bank mapping (`Slot 1` on `P3=0x40`, `Slot 2` on `P3=0x80`), 8 KiB persistent system NVRAM (`0xE000..0xFFFF`, compatible with `.sav` / `boot1.vhd` images) with optional warm-boot seeding, host local-time BCD RTC synchronization (`0x0124..0x0129`), ROM-to-VRAM DMA, hardware timer/clock handling, sticky interrupt latching, and a cycle-timed SM8521 UART + `P3` serial subsystem (`SerialLink`) supporting both 2-player `Compete.com` TCP/null-modem link play and a 9600-baud Virtual Hayes Modem + built-in text portal / TCP dialer for the Internet cartridge. The CPU uses the adapted MAME operation table (with clean-room SM8521 hardware fixes) and does not call or link to MAME.
+The project provides a clean-room C++ Sharp SM8521 CPU (`src/standalone/sm8521_cpu.cpp`, `src/standalone/sm8521_ops.inc`), bus/MMU model (`src/core.c`), reset/boot-ROM overlay (with a clean-room built-in handoff so `internal.bin` is optional when `external.bin` / `boot.rom` is present), external firmware and dual-slot cartridge bank mapping (`Slot 1` on `P3=0x40`, `Slot 2` on `P3=0x80`) with hardware address-mask mirroring (supporting `4 KiB..2 MiB` raw `.bin`/`.tgc` images as well as `768 KiB` and `1.75 MiB` split retail dumps), 8 KiB persistent system NVRAM (`0xE000..0xFFFF`, compatible with `.sav` / `boot1.vhd` images) with optional warm-boot seeding, host local-time BCD RTC synchronization (`0x0124..0x0129`), ROM-to-VRAM DMA, hardware `{1, 1024..65536}` timer prescalers, sticky interrupt latching, hardware-calibrated 5-shade STN LCD palettes (`Natural`, `Greenish`, `Grayish`, `High-Contrast`), and a cycle-timed SM8521 UART + `P3` serial subsystem (`SerialLink`) supporting both 2-player `Compete.com` TCP link play and a 9600-baud Virtual Hayes Modem + built-in text portal / TCP dialer for the Internet cartridge.
 
 The supplied firmware reaches the built-in OS/PDA menu after a 20-million-step run. With Centipede loaded, a scripted touch launches the cartridge; after its title and main menu, scheduled A/D-pad inputs advance to the active playfield. In a short repeatable run, left/right input moves the shooter across the screen and A produces a visible shot (`demos/centipede-gameplay-left.png`, `demos/centipede-gameplay-right.png`, `demos/centipede-gameplay-fire.png`). This is initial scripted gameplay/control verification, not proof of a long playable session or hardware accuracy. The 200×160 LCD renderer applies VRAM page selection, LCDC enable, display inversion (`LCC[0]`), 40/50-byte line stride (`LCH[5]`), four gradation palettes, live `LCV[7]` VBlank status, and Game.com LCD colors. Active-low controller groups, `P3` serial handshake lines (`DTR`/`RTS`/`CTS`/`DSR`), and an approximate 13×10 stylus grid are implemented. The SM8521 audio engine synthesizes signed 4-bit `SG0`/`SG1` wave RAM (`12-bit period + 1` at `5.000 MHz`), 15-bit LFSR `SG2` noise, and exclusive `SGDA` 8-bit PCM with sub-sample anti-aliasing, reconstruction low-pass filtering, and DC blocking, sending PCM to a bundled miniaudio backend in the SDL frontend. Scanline fetch races and analog LCD response remain incomplete.
 
@@ -53,9 +53,35 @@ This scripted run proceeds to Centipede gameplay and exercises left/right moveme
 
 Do not pass the BIOS ZIP as a cartridge; the loader rejects ZIP/unsupported sizes. Both Game.com cartridge slots are modeled (`--rom` for Slot 1 on `P3=0x40`, `--rom2` for Slot 2 on `P3=0x80`). System NVRAM (`0xE000..0xFFFF`, 8 KiB) persists automatically in the SDL frontend (`nvram.sav`) or via `--nvram PATH`. The local `firmware/` directory is present in this workspace but its ROM files are not included in source archives.
 
-### Manual GitHub Actions build
+### GitHub Actions Linux AppImage build
 
-The repository includes `.github/workflows/manual-build.yml`, triggered only by `workflow_dispatch`. After pushing the repo, open **Actions → Manual Linux build → Run workflow**. It builds on Ubuntu 22.04, compiles the CLI and GUI/audio frontend, runs all tests, then creates a portable `gamecom-linux-x86_64.AppImage` that bundles SDL2 and required runtime libraries without bundling host-conflicting GTK3 libraries. Download the workflow artifact, make the AppImage executable (`chmod +x gamecom-linux-x86_64.AppImage`), and run it. With no arguments, the app opens a launcher; **Browse** opens an asynchronous system folder/file dialog (or the built-in browser; hold `Shift` while clicking **Browse** to jump straight to the built-in picker, or drag-and-drop a folder/ROM onto the window). The firmware folder must contain `external.bin` (or `boot.rom`); `internal.bin` is used automatically when present and optional otherwise. Selected paths, LCD Hz, CPU speed, NVRAM options, and serial mode save in `$XDG_CONFIG_HOME/gamecom-emulator/launcher.ini` (or `~/.config/gamecom-emulator/launcher.ini`), 8 KiB system NVRAM saves in `nvram.sav`, and keyboard bindings save in `controls.ini`. AppImage does not bundle glibc: the host must provide glibc 2.35 or newer. Some Linux systems also need FUSE for AppImages; when FUSE is unavailable, try `APPIMAGE_EXTRACT_AND_RUN=1 ./gamecom-linux-x86_64.AppImage`. The raw `gamecom-sdl` binary is also included and requires SDL2 on the host. No BIOS or retail-game ROMs are included in the artifact.
+The repository includes `.github/workflows/manual-build.yml`, triggered automatically on pushes to `main` as well as manually via `workflow_dispatch`. It builds on Ubuntu 22.04, compiles the CLI and GUI/audio frontend, runs all tests, then creates a portable `gamecom-linux-x86_64.AppImage` that bundles SDL2 and required runtime libraries without bundling host-conflicting GTK3 libraries. Download the workflow artifact, make the AppImage executable (`chmod +x gamecom-linux-x86_64.AppImage`), and run it. With no arguments, the app opens a launcher; **Browse** opens an asynchronous system folder/file dialog (or the built-in browser; hold `Shift` while clicking **Browse** to jump straight to the built-in picker, or drag-and-drop a folder/ROM onto the window). The firmware folder must contain `external.bin` (or `boot.rom`); `internal.bin` is used automatically when present and optional otherwise. Selected paths, LCD Hz, VSync, palette, CPU speed, NVRAM options, and serial mode save in `$XDG_CONFIG_HOME/gamecom-emulator/launcher.ini` (or `~/.config/gamecom-emulator/launcher.ini`), 8 KiB system NVRAM saves in `nvram.sav`, and keyboard bindings save in `controls.ini`. AppImage does not bundle glibc: the host must provide glibc 2.35 or newer. Some Linux systems also need FUSE for AppImages; when FUSE is unavailable, try `APPIMAGE_EXTRACT_AND_RUN=1 ./gamecom-linux-x86_64.AppImage`. The raw `gamecom-sdl` binary is also included and requires SDL2 on the host. No BIOS or retail-game ROMs are included in the artifact.
+
+## Online Multiplayer (`Compete.com`) & Virtual Hayes Modem
+
+Both serial features use the hardware SM8521 UART (`0x2B..0x2E`, clocked at `Timer 0 / 64`) and active-low RS-232 handshake lines on `P3[3:0]` (`DSR`, `CTS`, `RTS`, `DTR`), and can be toggled live from **`System -> Serial`** in the top menu bar or from the command line:
+
+### 1. 2-Player `Compete.com` Link Cable (TCP over LAN / Internet / Localhost)
+
+1. Both players load the same 2-player-compatible Game.com ROM in Slot 1 and boot to the game's **`Compete` / `2 Player`** menu.
+2. **Player 1 (Host)**:
+   - GUI: open **`System -> (*) SERIAL: 2P HOST (TCP)`** (listens on TCP port `1997` by default), or
+   - CLI: `./gamecom-sdl --firmware firmware --rom Game.bin --link-listen 1997`
+   - Note: if playing over the internet, forward TCP port `1997` (or use Tailscale / ZeroTier / Radmin VPN so no port forwarding is needed).
+3. **Player 2 (Client)**:
+   - GUI: open **`System -> ( ) SERIAL: 2P JOIN (TCP)...`**, enter `<host-ip>:1997` (for two windows on the same PC, use `127.0.0.1:1997`), and press `Enter`, or
+   - CLI: `./gamecom-sdl --firmware firmware --rom Game.bin --link-connect 127.0.0.1:1997`
+4. Start the 2-player session inside both games; `DTR->DSR` and `RTS->CTS` cross-connect automatically once the TCP socket connects.
+
+### 2. Internet Cartridge / Web / Email (9600-Baud Virtual Hayes Modem)
+
+1. Load the ** Tiger Web Link / Internet ** cartridge in Slot 1 (or any terminal/modem cartridge).
+2. Enable the virtual modem:
+   - GUI: open **`System -> (*) SERIAL: MODEM (9600 AT)`**, or
+   - CLI: `./gamecom-sdl --firmware firmware --rom Internet.bin --modem`
+3. In the cartridge's ISP / dial-up setup, enter **any phone number** (e.g., `555-1997` or `0`) and dial:
+   - By default, dialing any unmapped number answers `CONNECT 9600` into the built-in interactive **`GAMECOM.NET`** text portal (`HELP`, `NEWS`, `GAMES`, `TIME`, `QUIT`, and `+++` escape back to `OK` command mode).
+   - To dial out to real Telnet BBSes or custom TCP text gateways, pass `--phonebook phonebook.ini` (with `number=host:port` lines such as `5551234=telehack.com:23` or `*=127.0.0.1:8080`) or dial an inline `ATDT127.0.0.1:2323` endpoint.
 
 CMake build and tests:
 

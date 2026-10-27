@@ -26,6 +26,7 @@ struct GcTimingOptions {
     GcTouchMode touch_mode = GC_TOUCH_SINGLE_TAP;
     bool audio_muted = false;
     unsigned audio_volume_percent = 100;
+    unsigned lcd_palette = 0;            /* 0=Natural STN, 1=Greenish, 2=Grayish, 3=High-Contrast */
     bool integer_scaling = false;
     bool auto_hide_menubar = false;
 };

@@ -15,8 +15,7 @@ struct UartTransmitByte {
     uint8_t value = 0;
 };
 
-// Standalone SM8521 execution core. It uses the Game.com bus API and has no
-// dependency on MAME's device framework or runtime.
+// Clean-room Sharp SM8521 CPU and on-chip peripheral model.
 class Sm8521Cpu {
 public:
     explicit Sm8521Cpu(GcMachine& machine);
@@ -133,7 +132,7 @@ private:
     uint64_t m_vblank_ticks = 0;
     uint8_t m_uart_tx_data = 0xFF;
     uint8_t m_uart_rx_data = 0;
-    uint8_t m_uart_status = 0x42;
+    uint8_t m_uart_status = 0x02;
     uint8_t m_uart_control = 0;
     bool m_uart_tx_pending = false;
     bool m_uart_tx_active = false;

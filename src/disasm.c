@@ -69,8 +69,8 @@ size_t gc_disassemble(GcMachine *machine, uint16_t address, char *out, size_t ou
         name = temp; break;
     }
     case 0x49: {
-        uint16_t target = (uint16_t)(gc_bus_debug_read(machine, (uint16_t)(address + 1)) |
-                          ((uint16_t)gc_bus_debug_read(machine, (uint16_t)(address + 2)) << 8));
+        uint16_t target = (uint16_t)(((uint16_t)gc_bus_debug_read(machine, (uint16_t)(address + 1)) << 8) |
+                                     gc_bus_debug_read(machine, (uint16_t)(address + 2)));
         len = 3; (void)snprintf(temp, sizeof(temp), "CALL %04X", target); name = temp; break;
     }
     case 0x4B: {
@@ -88,7 +88,8 @@ size_t gc_disassemble(GcMachine *machine, uint16_t address, char *out, size_t ou
                        op == 0x50 ? "CMP" : op == 0x51 ? "ADD" : op == 0x52 ? "SUB" : "MOV", y, x);
         name = temp; break;
     case 0x2D: case 0x3D:
-        (void)snprintf(temp, sizeof(temp), "DM? (MAME fallback; semantics unknown)"); name = temp; break;
+        x = gc_bus_debug_read(machine, (uint16_t)(address + 1)); len = 2;
+        (void)snprintf(temp, sizeof(temp), "DM #$%02X", x); name = temp; break;
     case 0xF0: name = "STOP"; break;
     case 0xF1: name = "HALT"; break;
     case 0xF8: name = "RET"; break;

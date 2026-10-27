@@ -97,17 +97,23 @@ static void test_register_arithmetic_and_cycles(void)
     free(m);
 }
 
-static void test_flags_and_unknown_dm_fallback(void)
+static void test_flags_and_dm_and_cart_mirroring(void)
 {
     GcMachine *m = new_machine();
+    assert(m->bus.reg_file[0x2D] == 0x02u); /* Hardware URTS reset = 0x02 (TDRE=1). */
     const uint8_t program[] = {
         0x58, 0x7F, 0x02, /* MOV RF[02],#7F */
         0x51, 0x01, 0x02, /* ADD RF[02],#01 => 80, S and V set */
-        0x2D,             /* MAME-compatible unknown DM fallback */
+        0x2D, 0x0E,       /* 2-byte SM8521 DM NOP (must skip operand 0x0E) */
+        0x49, 0x10, 0x40, /* CALL $1040 (big-endian target) */
         0xFF
     };
     memcpy(m->bus.patch + 0x1020, program, sizeof(program));
     memset(m->bus.patch_valid + 0x1020, 1, sizeof(program));
+    m->bus.patch[0x1040] = 0xF8u; /* RET */
+    m->bus.patch_valid[0x1040] = 1;
+    gc_bus_write(m, 0x1D, 0xC0u); /* SPL = 0xC0 */
+
     assert(gc_cpu_step(m) == GC_STEP_OK);
     assert(gc_cpu_step(m) == GC_STEP_OK);
     assert(gc_cpu_reg_read(m, 2) == 0x80);
@@ -115,7 +121,50 @@ static void test_flags_and_unknown_dm_fallback(void)
     uint64_t before = m->cpu.cycles;
     assert(gc_cpu_step(m) == GC_STEP_OK);
     assert(m->cpu.cycles - before == 4);
-    assert(m->cpu.pc == 0x1027);
+    assert(m->cpu.pc == 0x1028); /* 2-byte DM advanced past operand 0x0E */
+    assert(gc_cpu_step(m) == GC_STEP_OK); /* CALL $1040 */
+    assert(m->cpu.pc == 0x1040);
+    assert(gc_cpu_step(m) == GC_STEP_OK); /* RET -> $102B */
+    assert(m->cpu.pc == 0x102B);
+
+    /* Hardware address-mask mirroring (64 KiB raw + 768 KiB split retail dump + ZIP rejection). */
+    char err[128] = {0};
+    const char *tmp_rom = "/tmp/tgamecom-test-cart.bin";
+    uint8_t *img = (uint8_t *)calloc(0x0C0000u, 1u);
+    assert(img != NULL);
+    /* 1) 64 KiB raw ROM mirrors every 64 KiB across the 2 MiB slot window. */
+    img[0] = 0x42u;
+    memcpy(img + 5u, "TigerDMGC", 9u);
+    FILE *f = fopen(tmp_rom, "wb");
+    assert(f != NULL);
+    assert(fwrite(img, 1u, 0x010000u, f) == 0x010000u);
+    fclose(f);
+    assert(gc_load_cartridge_slot(m, 1u, tmp_rom, err, sizeof(err)));
+    assert(m->bus.rom[0x40000u] == 0x42u);
+    assert(memcmp(m->bus.rom + 0x40005u, "TigerDMGC", 9u) == 0);
+
+    /* 2) 768 KiB (0x0C0000) split dump places bank 0x20 at +0x40000 and mirrors 1 MiB -> 2 MiB. */
+    memset(img, 0x11, 0x0C0000u);
+    memcpy(img + 5u, "TigerDMGC", 9u);
+    img[0x0BFFFFu] = 0x99u;
+    f = fopen(tmp_rom, "wb");
+    assert(f != NULL);
+    assert(fwrite(img, 1u, 0x0C0000u, f) == 0x0C0000u);
+    fclose(f);
+    assert(gc_load_cartridge_slot(m, 1u, tmp_rom, err, sizeof(err)));
+    assert(memcmp(m->bus.rom + 0x40005u, "TigerDMGC", 9u) == 0);
+    assert(m->bus.rom[0x0FFFFFu] == 0x99u);
+    assert(m->bus.rom[0x1FFFFFu] == 0x99u);
+
+    /* 3) ZIP header is rejected cleanly. */
+    memcpy(img, "PK\x03\x04", 4u);
+    f = fopen(tmp_rom, "wb");
+    assert(f != NULL);
+    assert(fwrite(img, 1u, 0x008000u, f) == 0x008000u);
+    fclose(f);
+    assert(!gc_load_cartridge_slot(m, 1u, tmp_rom, err, sizeof(err)));
+    remove(tmp_rom);
+    free(img);
     free(m);
 }
 
@@ -264,7 +313,7 @@ int main(void)
 {
     test_reset_and_memory_map();
     test_register_arithmetic_and_cycles();
-    test_flags_and_unknown_dm_fallback();
+    test_flags_and_dm_and_cart_mirroring();
     test_cpu_vram_store_instruction();
     test_pio_controller_and_touch_inputs();
     test_nvram_and_synthesized_boot_rom();

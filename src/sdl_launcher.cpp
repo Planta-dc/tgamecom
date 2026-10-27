@@ -841,6 +841,7 @@ enum class ItemOp {
     SetTouchMode,
     ToggleMute,
     SetVolume,
+    SetPalette,
     ToggleIntegerScale,
     ToggleAutoHideBar,
     ToggleVsync,
@@ -882,7 +883,7 @@ DropdownLayout build_dropdown_layout(int tab, int win_w, int win_h,
     const auto tabs = build_menubar_tabs(sel, win_w);
     if (tab < 0 || tab >= static_cast<int>(tabs.size())) return out;
 
-    const bool compact = (win_h < 500) || (tab == 0 && win_h < 640);
+    const bool compact = (win_h < 500) || ((tab == 0 || tab == 4) && win_h < 660);
     const int row_h = compact ? 20 : 25;
     const int div_h = compact ? 5 : 7;
     out.text_scale = compact ? 1 : 2;
@@ -995,10 +996,10 @@ DropdownLayout build_dropdown_layout(int tab, int win_w, int win_h,
         struct Preset { double hz; const char *name; };
         static constexpr std::array<Preset, 8> presets = {{
             {GC_LCD_NATIVE_HZ, "75.48 HZ (HW NATIVE)"},
-            {60.0, "60.0 HZ  (60FPS DISPLAY)"},
-            {59.732155, "59.73 HZ (MAME LEGACY)"},
-            {30.0, "30.0 HZ  (HALF RATE)"},
+            {60.0, "60.0 HZ  (60FPS BUFFERED)"},
             {50.0, "50.0 HZ  (PAL)"},
+            {45.0, "45.0 HZ"},
+            {30.0, "30.0 HZ  (HALF RATE)"},
             {75.0, "75.0 HZ"},
             {90.0, "90.0 HZ"},
             {120.0, "120.0 HZ"}
@@ -1108,6 +1109,20 @@ DropdownLayout build_dropdown_layout(int tab, int win_w, int win_h,
             std::snprintf(vbuf, sizeof(vbuf), "%sVOLUME: %u%%", active ? "(*) " : "( ) ", vol);
             add_item(vbuf, true, active, true, ItemOp::SetVolume,
                      GcMenuAction::None, static_cast<double>(vol));
+        }
+        add_div();
+        struct PalPreset { unsigned id; const char *name; };
+        static constexpr std::array<PalPreset, 4> pal_presets = {{
+            {0u, "PALETTE: NATURAL STN (HW)"},
+            {1u, "PALETTE: POCKET GREENISH"},
+            {2u, "PALETTE: CRISP GRAYISH"},
+            {3u, "PALETTE: HIGH CONTRAST"}
+        }};
+        for (const auto& pal : pal_presets) {
+            const bool active = (sel.timing.lcd_palette == pal.id);
+            add_item(std::string(active ? "(*) " : "( ) ") + pal.name,
+                     true, active, true, ItemOp::SetPalette,
+                     GcMenuAction::None, static_cast<double>(pal.id));
         }
         add_div();
         add_item(sel.timing.vsync ? "[X] HOST VSYNC" : "[ ] HOST VSYNC",
@@ -1921,6 +1936,18 @@ bool GcTopMenuBar::handle_event(const SDL_Event& event, SDL_Window *window,
                     show_toast("AUDIO VOLUME: " + std::to_string(selection.timing.audio_volume_percent) + "%");
                     out_action = GcMenuAction::TimingChanged;
                     break;
+                case ItemOp::SetPalette: {
+                    static constexpr const char *k_pal_names[4] = {
+                        "NATURAL STN (HW)", "POCKET GREENISH", "CRISP GRAYISH", "HIGH CONTRAST"
+                    };
+                    selection.timing.lcd_palette =
+                        std::min(3u, static_cast<unsigned>(std::lround(item.value)));
+                    (void)gc_save_launch_selection(selection);
+                    show_toast(std::string("LCD PALETTE: ") +
+                               k_pal_names[selection.timing.lcd_palette]);
+                    out_action = GcMenuAction::TimingChanged;
+                    break;
+                }
                 case ItemOp::SetSerialMode: {
                     const unsigned sm = static_cast<unsigned>(std::lround(item.value));
                     selection.serial_mode = sm == 2u ? GC_SERIAL_TCP_HOST
@@ -2214,6 +2241,11 @@ GcLaunchSelection gc_load_launch_selection()
             const unsigned long parsed = std::strtoul(value.c_str(), &end, 10);
             if (end && end != value.c_str())
                 selection.timing.audio_volume_percent = std::min<unsigned>(100u, static_cast<unsigned>(parsed));
+        } else if (name == "lcd_palette") {
+            char *end = nullptr;
+            const unsigned long parsed = std::strtoul(value.c_str(), &end, 10);
+            if (end && end != value.c_str())
+                selection.timing.lcd_palette = std::min<unsigned>(3u, static_cast<unsigned>(parsed));
         } else if (name == "integer_scaling") {
             selection.timing.integer_scaling = (value == "1" || value == "true");
         } else if (name == "auto_hide_menubar") {
@@ -2274,6 +2306,7 @@ bool gc_save_launch_selection(const GcLaunchSelection& selection)
     output << "touch_mode=" << static_cast<unsigned>(selection.timing.touch_mode) << '\n';
     output << "audio_muted=" << (selection.timing.audio_muted ? 1 : 0) << '\n';
     output << "audio_volume_percent=" << selection.timing.audio_volume_percent << '\n';
+    output << "lcd_palette=" << selection.timing.lcd_palette << '\n';
     output << "integer_scaling=" << (selection.timing.integer_scaling ? 1 : 0) << '\n';
     output << "auto_hide_menubar=" << (selection.timing.auto_hide_menubar ? 1 : 0) << '\n';
     return output.good();

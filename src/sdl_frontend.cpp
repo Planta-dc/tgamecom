@@ -568,6 +568,7 @@ int gc_sdl_session_run(GcMachine& machine, standalone::Sm8521Cpu& cpu,
                 case GcMenuAction::TimingChanged:
                     nominal_cpu_hz = apply_cpu_clock();
                     next_present_tick = SDL_GetPerformanceCounter();
+                    lcd_texture_initialized = false;
                     if (selection.timing.touch_mode != GC_TOUCH_HOLD_DRAG && continuous_drag_active) {
                         continuous_drag_active = false;
                         (void)gc_input_set_touch(&machine, false, 0, 0);
@@ -1097,7 +1098,9 @@ int gc_sdl_session_run(GcMachine& machine, standalone::Sm8521Cpu& cpu,
                     serial_link.poll(machine, cpu);
                     cpu.trigger_vblank();
 
-                    if (do_blend && gc_lcd_render_argb(&machine, blend_scratch.data(), GC_LCD_WIDTH)) {
+                    if (do_blend && gc_lcd_render_argb_palette(
+                            &machine, blend_scratch.data(), GC_LCD_WIDTH,
+                            selection.timing.lcd_palette)) {
                         for (std::size_t px = 0; px < blend_scratch.size(); ++px) {
                             const std::uint32_t c = blend_scratch[px];
                             blend_accum[px * 3u + 0u] += (c >> 16) & 0xFFu;
@@ -1166,7 +1169,9 @@ int gc_sdl_session_run(GcMachine& machine, standalone::Sm8521Cpu& cpu,
         }
 
         if (vblanks_due > 0u || !lcd_texture_initialized) {
-            if (!multi_vblank_blended && !gc_lcd_render_argb(&machine, pixels.data(), GC_LCD_WIDTH)) {
+            if (!multi_vblank_blended &&
+                !gc_lcd_render_argb_palette(&machine, pixels.data(), GC_LCD_WIDTH,
+                                            selection.timing.lcd_palette)) {
                 std::fprintf(stderr, "Could not render Game.com LCD frame.\n");
                 done = true;
                 break;

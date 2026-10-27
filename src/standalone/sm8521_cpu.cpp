@@ -1,20 +1,15 @@
-// Standalone SM8521 CPU and on-chip peripheral model.
-// Opcode table in sm85ops_mame.inc adapted from MAME's BSD-3-Clause SM8500 source
-// (Copyright Wilbert Pol), with clean-room SM8521 hardware fixes for indirect
-// addressing, timers, interrupts, UART baud timing, CKC prescaler, LCV status,
-// sound SFR readback, and DMA blitter cycle accounting.
+// Clean-room Sharp SM8521 CPU and on-chip peripheral model.
+// Instruction decode and execution live in sm8521_ops.inc, modeling SM8521
+// addressing modes, ALU flags, 5.0 MHz phi0 timers, sticky interrupts, UART
+// baud timing, CKC prescaler, LCV status, sound SFR readback, and DMA blitter.
 #include "sm8521_cpu.hpp"
 
 #include <algorithm>
-#include <cstdio>
 #include <cstdint>
 #include <ctime>
 
-#define logerror(...) (void)std::fprintf(stderr, __VA_ARGS__)
-
 namespace standalone {
 
-static constexpr uint8_t sm8500_b2w[8] = { 0, 8, 2, 10, 4, 12, 6, 14 };
 static constexpr uint64_t GAMECOM_FRAME_CYCLES = GC_LCD_NATIVE_CYCLES; // 320 * 207 = 66,240 phi0 cycles
 
 Sm8521Cpu::Sm8521Cpu(GcMachine& machine) : m_machine(machine)
@@ -56,7 +51,7 @@ void Sm8521Cpu::reset()
     m_vblank_ticks = 0;
     m_uart_tx_data = 0xFF;
     m_uart_rx_data = 0;
-    m_uart_status = 0x42; /* TDRE=1 after reset. */
+    m_uart_status = 0x02; /* Hardware reset: TDRE=1 (bit 1), all other status bits 0. */
     m_uart_control = 0;
     m_uart_tx_pending = false;
     m_uart_tx_active = false;
@@ -835,17 +830,11 @@ bool Sm8521Cpu::step()
     }
 
     int mycycles = 0;
-    uint8_t r1 = 0, r2 = 0;
-    uint16_t s1 = 0, s2 = 0;
-    uint32_t d1 = 0, d2 = 0;
-    uint32_t res = 0;
 
     load_sfr_state();
     const uint8_t prev_ps0 = m_PS0;
-    uint8_t op = mem_readbyte(m_PC++);
-    switch (op) {
-#include "sm85ops_mame.inc"
-    }
+    const uint8_t op = mem_readbyte(m_PC++);
+#include "sm8521_ops.inc"
 
     if (m_SYS & 0x40u) gc_bus_write(&m_machine, 0x1C, static_cast<uint8_t>(m_SP >> 8));
     gc_bus_write(&m_machine, 0x1D, static_cast<uint8_t>(m_SP));
