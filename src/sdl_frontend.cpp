@@ -391,7 +391,7 @@ int gc_sdl_session_run(GcMachine& machine, standalone::Sm8521Cpu& cpu,
             if (!standalone::parse_host_port(selection.serial_endpoint, host, port, 1997))
                 port = 1997;
             if (!serial_link.listen_tcp(port, &serr)) {
-                menubar.show_toast("TCP LISTEN FAILED: " + serr, 3.0);
+                menubar.show_toast("TCP LISTEN FAILED: " + serr, 6.0);
                 return;
             }
             break;
@@ -401,7 +401,7 @@ int gc_sdl_session_run(GcMachine& machine, standalone::Sm8521Cpu& cpu,
             std::uint16_t port = 1997;
             if (!standalone::parse_host_port(selection.serial_endpoint, host, port, 1997) ||
                 !serial_link.connect_tcp(host, port, &serr)) {
-                menubar.show_toast("TCP CONNECT FAILED: " + serr, 3.0);
+                menubar.show_toast("TCP CONNECT FAILED: " + serr, 6.0);
                 return;
             }
             break;
@@ -450,8 +450,8 @@ int gc_sdl_session_run(GcMachine& machine, standalone::Sm8521Cpu& cpu,
     double vblank_accum = 0.0;
 
     std::string launcher_status = gc_ui_valid_firmware(selection.firmware_dir)
-        ? "FIRMWARE READY. USE THE TOP MENU BAR TO ADJUST LCD HZ, CPU SPEED, INPUT, OR AUDIO."
-        : "SELECT OR DRAG-AND-DROP YOUR FIRMWARE FOLDER AND OPTIONAL CARTRIDGE ROM.";
+        ? "Firmware ready. Use the menus to adjust display, speed, controls, and audio."
+        : "Select a firmware folder and, optionally, a cartridge ROM.";
 
     auto boot_system = [&](bool bios_only) -> bool {
         if (emulation_ready && !demo_mode)
@@ -465,7 +465,7 @@ int gc_sdl_session_run(GcMachine& machine, standalone::Sm8521Cpu& cpu,
         std::string err;
         if (!load_machine_media(machine, boot_sel, demo_mode, err)) {
             launcher_status = err;
-            menubar.show_toast(err, 3.0);
+            menubar.show_toast(err, 6.0);
             return false;
         }
         cpu.reset();
@@ -612,7 +612,7 @@ int gc_sdl_session_run(GcMachine& machine, standalone::Sm8521Cpu& cpu,
                     if (save_machine_nvram(machine, selection, &nerr))
                         menubar.show_toast("SAVED 8KB SYSTEM NVRAM");
                     else
-                        menubar.show_toast("NVRAM SAVE ERROR: " + nerr, 3.0);
+                        menubar.show_toast("NVRAM SAVE ERROR: " + nerr, 6.0);
                     break;
                 }
                 case GcMenuAction::SeedWarmBootNvram:
@@ -919,7 +919,7 @@ int gc_sdl_session_run(GcMachine& machine, standalone::Sm8521Cpu& cpu,
                         (void)gc_save_launch_selection(selection);
                         menubar.show_toast("SLOT 2 CARTRIDGE LOADED");
                     } else {
-                        menubar.show_toast(std::string("SLOT 2 ERROR: ") + rerr, 3.0);
+                        menubar.show_toast(std::string("SLOT 2 ERROR: ") + rerr, 6.0);
                     }
                 }
                 force_builtin_picker = false;
@@ -1007,32 +1007,32 @@ int gc_sdl_session_run(GcMachine& machine, standalone::Sm8521Cpu& cpu,
 
             SDL_SetRenderDrawColor(renderer, background.r, background.g, background.b, background.a);
             SDL_RenderClear(renderer);
-            font.draw(48, 56, "GAME.COM EMULATOR", accent, 4, 60);
-            font.draw(50, 102, "SELECT FIRMWARE & ROM BELOW — USE THE TOP MENU BAR FOR HZ, SPEED, INPUT & AUDIO", muted, 2, 74);
+            font.draw(48, 56, "Game.com Emulator", accent, 3, 60);
+            font.draw(50, 102, "Choose firmware and an optional game ROM. Settings are in the menus above.", muted, 2, 74);
 
             const SDL_Rect fw_panel{40, 144, win_w - 80, 110};
             const SDL_Rect rom_panel{40, 280, win_w - 80, 110};
             gc_ui_fill(renderer, fw_panel, panel); gc_ui_outline(renderer, fw_panel, blue);
             gc_ui_fill(renderer, rom_panel, panel); gc_ui_outline(renderer, rom_panel, blue);
 
-            font.draw(60, 162, "1  SYSTEM FIRMWARE (EXTERNAL.BIN / BOOT.ROM)", ink, 2, 54);
+            font.draw(60, 162, "System firmware", ink, 2, 54);
             font.draw(60, 194,
-                      selection.firmware_dir.empty() ? "NO FIRMWARE FOLDER SELECTED" : gc_ui_short_path(selection.firmware_dir, 48),
+                      selection.firmware_dir.empty() ? "No firmware folder selected" : gc_ui_short_path(selection.firmware_dir, 48),
                       cur_fw_ok ? accent : warning, 2, 50);
-            font.draw(60, 226, "HOLD SHIFT + CLICK BROWSE TO OPEN THE IN-APP BROWSER DIRECTLY.", muted, 1, 80);
-            gc_ui_draw_button(renderer, font, fw_btn, "BROWSE...", true, false,
+            font.draw(60, 226, "Choose the folder containing external.bin (internal.bin is optional).", muted, 1, 80);
+            gc_ui_draw_button(renderer, font, fw_btn, "Browse...", true, false,
                               gc_ui_inside(mx, my, fw_btn));
 
-            font.draw(60, 298, "2  GAME CARTRIDGE (.BIN, OPTIONAL)", ink, 2, 46);
+            font.draw(60, 298, "Cartridge ROM (optional)", ink, 2, 46);
             font.draw(60, 330,
-                      selection.cartridge_path.empty() ? "NO GAME SELECTED (BOOT BIOS MENU)" : gc_ui_short_path(selection.cartridge_path, 38),
+                      selection.cartridge_path.empty() ? "No game selected" : gc_ui_short_path(selection.cartridge_path, 38),
                       cur_rom_ok ? accent : muted, 2, 40);
-            font.draw(60, 362, "DRAG AND DROP A FOLDER OR CARTRIDGE ROM ANYWHERE INTO THIS WINDOW.", muted, 1, 80);
+            font.draw(60, 362, "Supported files: .bin, .rom, and .tgc. You can also drag a file here.", muted, 1, 80);
             if (cur_rom_ok) {
-                gc_ui_draw_button(renderer, font, rom_clear_btn, "CLEAR", true, false,
+                gc_ui_draw_button(renderer, font, rom_clear_btn, "Clear", true, false,
                                   gc_ui_inside(mx, my, rom_clear_btn));
             }
-            gc_ui_draw_button(renderer, font, rom_btn, "BROWSE...", true, false,
+            gc_ui_draw_button(renderer, font, rom_btn, "Browse...", true, false,
                               gc_ui_inside(mx, my, rom_btn));
 
             font.draw(50, 418, launcher_status,
@@ -1040,15 +1040,15 @@ int gc_sdl_session_run(GcMachine& machine, standalone::Sm8521Cpu& cpu,
                       launcher_status.find("MISSING") != std::string::npos ? warning : muted,
                       2, 72);
 
-            gc_ui_draw_button(renderer, font, bios_btn, "BOOT BIOS", cur_fw_ok, false,
+            gc_ui_draw_button(renderer, font, bios_btn, "Start BIOS", cur_fw_ok, false,
                               gc_ui_inside(mx, my, bios_btn));
-            gc_ui_draw_button(renderer, font, game_btn, "BOOT GAME", cur_fw_ok && cur_rom_ok, false,
+            gc_ui_draw_button(renderer, font, game_btn, "Start game", cur_fw_ok && cur_rom_ok, false,
                               gc_ui_inside(mx, my, game_btn));
             if (emulation_ready) {
-                gc_ui_draw_button(renderer, font, resume_btn, "RESUME", true, true,
+                gc_ui_draw_button(renderer, font, resume_btn, "Resume", true, true,
                                   gc_ui_inside(mx, my, resume_btn));
             }
-            gc_ui_draw_button(renderer, font, quit_btn, "QUIT", true, false,
+            gc_ui_draw_button(renderer, font, quit_btn, "Exit", true, false,
                               gc_ui_inside(mx, my, quit_btn));
 
             menubar.render(window, renderer, font, selection, true, emulation_ready,

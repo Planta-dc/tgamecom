@@ -52,6 +52,19 @@ std::array<unsigned char, 7> glyph(char c)
     case 'M': return {17,27,21,21,17,17,17}; case 'N': return {17,25,21,19,17,17,17};
     case 'O': return {14,17,17,17,17,17,14}; case 'P': return {30,17,17,30,16,16,16};
     case 'Q': return {14,17,17,17,21,18,13}; case 'R': return {30,17,17,30,20,18,17};
+    case 'a': return {0,14,1,15,17,19,13}; case 'b': return {16,16,30,17,17,17,30};
+    case 'c': return {0,14,16,16,16,17,14}; case 'd': return {1,1,15,17,17,19,13};
+    case 'e': return {0,14,17,31,16,17,14}; case 'f': return {6,8,8,30,8,8,8};
+    case 'g': return {0,15,17,17,15,1,14}; case 'h': return {16,16,30,17,17,17,17};
+    case 'i': return {4,0,12,4,4,4,14}; case 'j': return {2,0,6,2,2,18,12};
+    case 'k': return {16,16,18,20,24,20,18}; case 'l': return {12,4,4,4,4,4,14};
+    case 'm': return {0,26,21,21,21,21,21}; case 'n': return {0,30,17,17,17,17,17};
+    case 'o': return {0,14,17,17,17,17,14}; case 'p': return {0,30,17,17,30,16,16};
+    case 'q': return {0,15,17,17,15,1,1}; case 'r': return {0,22,25,16,16,16,16};
+    case 's': return {0,15,16,14,1,1,30}; case 't': return {8,8,30,8,8,9,6};
+    case 'u': return {0,17,17,17,17,19,13}; case 'v': return {0,17,17,17,17,10,4};
+    case 'w': return {0,17,17,21,21,21,10}; case 'x': return {0,17,10,4,10,17,17};
+    case 'y': return {0,17,17,17,15,1,14}; case 'z': return {0,31,2,4,8,16,31};
     case 'S': return {15,16,16,14,1,1,30}; case 'T': return {31,4,4,4,4,4,4};
     case 'U': return {17,17,17,17,17,17,14}; case 'V': return {17,17,17,17,17,10,4};
     case 'W': return {17,17,17,21,21,21,10}; case 'X': return {17,17,10,4,10,17,17};
@@ -70,6 +83,7 @@ std::array<unsigned char, 7> glyph(char c)
     case '[': return {14,8,8,8,8,8,14}; case ']': return {14,2,2,2,2,2,14};
     case '<': return {2,4,8,16,8,4,2}; case '>': return {8,4,2,1,2,4,8};
     case '%': return {25,25,2,4,8,19,19}; case '~': return {0,0,8,21,2,0,0};
+    case '&': return {12,18,20,8,21,18,13}; case '"': return {10,10,0,0,0,0,0};
     case '#': return {10,10,31,10,31,10,10}; case '|': return {4,4,4,4,4,4,4};
     case '\'': return {4,4,8,0,0,0,0}; case '!': return {4,4,4,4,4,0,4};
     case '?': return {14,17,1,2,4,0,4}; case '*': return {0,17,10,31,10,17,0};
@@ -80,9 +94,15 @@ std::array<unsigned char, 7> glyph(char c)
 
 fs::path home_dir_path()
 {
+#if defined(_WIN32)
+    if (const char *profile = std::getenv("USERPROFILE")) {
+        if (*profile) return fs::path(profile);
+    }
+#else
     if (const char *home = std::getenv("HOME")) {
         if (*home) return fs::path(home);
     }
+#endif
     std::error_code ec;
     const fs::path current = fs::current_path(ec);
     return ec ? fs::path(".") : current;
@@ -90,10 +110,19 @@ fs::path home_dir_path()
 
 fs::path config_directory()
 {
+#if defined(_WIN32)
+    if (const char *appdata = std::getenv("APPDATA")) {
+        if (*appdata) return fs::path(appdata) / "gamecom-emulator";
+    }
+    return home_dir_path() / "AppData" / "Roaming" / "gamecom-emulator";
+#elif defined(__APPLE__)
+    return home_dir_path() / "Library" / "Application Support" / "gamecom-emulator";
+#else
     if (const char *xdg = std::getenv("XDG_CONFIG_HOME")) {
         if (*xdg) return fs::path(xdg) / "gamecom-emulator";
     }
     return home_dir_path() / ".config" / "gamecom-emulator";
+#endif
 }
 
 fs::path bindings_file()
@@ -165,23 +194,20 @@ void draw_dialog_wait_overlay(SDL_Window *window, SDL_Renderer *renderer,
 
     font.draw(modal.x + 28, modal.y + 28,
               mode == BrowserMode::FirmwareDirectory
-                  ? "SYSTEM FOLDER DIALOG OPEN"
-                  : "SYSTEM FILE DIALOG OPEN",
+                  ? "Select a firmware folder"
+                  : "Select a cartridge ROM",
               accent, 3, 44);
     font.draw(modal.x + 28, modal.y + 78,
-              "CHOOSE YOUR PATH IN THE SYSTEM WINDOW, OR SWITCH TO THE",
+              "Choose a location in the system dialog, or use the built-in browser below.",
               ink, 2, 52);
-    font.draw(modal.x + 28, modal.y + 104,
-              "BUILT-IN BROWSER BELOW IF THE DIALOG IS HIDDEN.",
-              muted, 2, 52);
 
     builtin_btn = SDL_Rect{modal.x + 28, modal.y + modal.h - 68, 280, 44};
     cancel_btn = SDL_Rect{modal.x + modal.w - 198, modal.y + modal.h - 68, 170, 44};
     int mx = 0, my = 0;
     gc_ui_map_mouse(window, w, h, mouse_x, mouse_y, mx, my);
-    gc_ui_draw_button(renderer, font, builtin_btn, "IN-APP BROWSER", true, false,
+    gc_ui_draw_button(renderer, font, builtin_btn, "Browse in app", true, false,
                       gc_ui_inside(mx, my, builtin_btn));
-    gc_ui_draw_button(renderer, font, cancel_btn, "CANCEL (ESC)", true, false,
+    gc_ui_draw_button(renderer, font, cancel_btn, "Cancel (Esc)", true, false,
                       gc_ui_inside(mx, my, cancel_btn));
 }
 
@@ -734,12 +760,12 @@ bool run_browser(SDL_Window *window, SDL_Renderer *renderer, const GcUiFont& fon
         gc_ui_fill(renderer, modal, panel);
         gc_ui_outline(renderer, modal, blue);
         font.draw(modal.x + 24, modal.y + 22,
-                  mode == BrowserMode::FirmwareDirectory ? "CHOOSE FIRMWARE FOLDER" : "CHOOSE GAME ROM",
+                  mode == BrowserMode::FirmwareDirectory ? "Choose firmware folder" : "Choose game ROM",
                   accent, 3, 26);
-        gc_ui_draw_button(renderer, font, up_button, "UP", true, false, gc_ui_inside(mx, my, up_button));
-        gc_ui_draw_button(renderer, font, home_button, "HOME", true, false, gc_ui_inside(mx, my, home_button));
+        gc_ui_draw_button(renderer, font, up_button, "Up", true, false, gc_ui_inside(mx, my, up_button));
+        gc_ui_draw_button(renderer, font, home_button, "Home", true, false, gc_ui_inside(mx, my, home_button));
         if (mode == BrowserMode::CartridgeFile) {
-            gc_ui_draw_button(renderer, font, filter_button, show_all_files ? "ALL" : ".BIN",
+            gc_ui_draw_button(renderer, font, filter_button, show_all_files ? "All files" : ".bin",
                               true, show_all_files, gc_ui_inside(mx, my, filter_button));
         }
 
@@ -756,8 +782,8 @@ bool run_browser(SDL_Window *window, SDL_Renderer *renderer, const GcUiFont& fon
             const bool chosen = index == selected;
             const bool hovered = gc_ui_inside(mx, my, item);
             if (chosen) gc_ui_fill(renderer, item, panel_light);
-            else if (hovered) gc_ui_fill(renderer, item, GcUiColor{20, 33, 48, 255});
-            const std::string label = entry.directory ? "[DIR]  " + entry.name : "[ROM]  " + entry.name;
+            else if (hovered) gc_ui_fill(renderer, item, panel_hover);
+            const std::string label = entry.directory ? "Folder  " + entry.name : "File  " + entry.name;
             font.draw(item.x + 8, item.y + 6, label, chosen ? accent : ink, 2,
                       std::max(1, (item.w - 16) / 12));
         }
@@ -768,8 +794,8 @@ bool run_browser(SDL_Window *window, SDL_Renderer *renderer, const GcUiFont& fon
                       "EXTERNAL.BIN DETECTED IN THIS FOLDER (INTERNAL.BIN OPTIONAL)!", accent, 2, 62);
 
         const std::string hint = mode == BrowserMode::FirmwareDirectory
-            ? "WHEEL/ARROWS SCROLL  DOUBLE-CLICK/ENTER OPENS  BACKSPACE UP  S SELECTS FOLDER"
-            : "WHEEL/ARROWS SCROLL  DOUBLE-CLICK/ENTER OPENS ROM OR FOLDER  BACKSPACE UP";
+            ? "Use arrows or the wheel to browse; Enter opens; Backspace goes up; S selects this folder."
+            : "Use arrows or the wheel to browse; Enter opens a file or folder; Backspace goes up.";
         font.draw(modal.x + 24, modal.y + modal.h - 86, hint, muted, 1,
                   std::max(1, (modal.w - 48) / 6));
         const bool can_accept = mode == BrowserMode::FirmwareDirectory ||
@@ -800,24 +826,10 @@ struct TabSpec {
 
 std::array<TabSpec, 5> build_menubar_tabs(const GcLaunchSelection& sel, int win_w = 800)
 {
+    (void)sel;
     const int scale = (win_w > 0 && win_w < 700) ? 1 : 2;
-    char lcd_buf[32];
-    if (std::fabs(sel.timing.lcd_hz - std::round(sel.timing.lcd_hz)) < 0.005)
-        std::snprintf(lcd_buf, sizeof(lcd_buf), "LCD:%.0fHZ", sel.timing.lcd_hz);
-    else
-        std::snprintf(lcd_buf, sizeof(lcd_buf), "LCD:%.2fHZ", sel.timing.lcd_hz);
-
-    char cpu_buf[36];
-    if (sel.timing.game_pace_percent != 100u) {
-        std::snprintf(cpu_buf, sizeof(cpu_buf), "CPU:%u%%*%.1fX",
-                      sel.timing.cpu_speed_percent,
-                      static_cast<double>(sel.timing.game_pace_percent) / 100.0);
-    } else {
-        std::snprintf(cpu_buf, sizeof(cpu_buf), "CPU:%u%%", sel.timing.cpu_speed_percent);
-    }
-
     std::array<std::string, 5> labels = {
-        "SYSTEM", lcd_buf, cpu_buf, "INPUT", "AUDIO/VIEW"
+        "File", "Display", "Speed", "Input", "Audio"
     };
     std::array<TabSpec, 5> tabs{};
     int x = 6;
@@ -873,6 +885,57 @@ struct DropdownLayout {
     std::vector<DropdownItem> items;
     int text_scale = 2;
 };
+
+std::string ui_friendly_text(const std::string& input)
+{
+    if (input.find('/') != std::string::npos || input.find('\\') != std::string::npos)
+        return input;
+    std::string extension_check = input;
+    std::transform(extension_check.begin(), extension_check.end(), extension_check.begin(),
+                   [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+    for (const char *ext : {".bin", ".rom", ".tgc", ".sav", ".ini", ".hex"}) {
+        if (extension_check.find(ext) != std::string::npos) return input;
+    }
+    bool has_letter = false;
+    for (unsigned char ch : input) {
+        if (std::isalpha(ch)) {
+            has_letter = true;
+            if (std::islower(ch)) return input;
+        }
+    }
+    if (!has_letter) return input;
+
+    std::string text = input;
+    std::transform(text.begin(), text.end(), text.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    for (char& ch : text) {
+        if (std::isalpha(static_cast<unsigned char>(ch))) {
+            ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+            break;
+        }
+    }
+    const auto restore = [&](const char *word, const char *replacement) {
+        std::size_t pos = 0;
+        const std::string needle(word);
+        while ((pos = text.find(needle, pos)) != std::string::npos) {
+            const bool left = pos == 0 || !std::isalnum(static_cast<unsigned char>(text[pos - 1]));
+            const std::size_t end = pos + needle.size();
+            const bool right = end == text.size() || !std::isalnum(static_cast<unsigned char>(text[end]));
+            if (left && right) {
+                text.replace(pos, needle.size(), replacement);
+                pos += std::char_traits<char>::length(replacement);
+            } else {
+                pos = end;
+            }
+        }
+    };
+    restore("lcd", "LCD"); restore("rom", "ROM"); restore("cpu", "CPU");
+    restore("nvram", "NVRAM"); restore("tcp", "TCP"); restore("fps", "FPS");
+    restore("mhz", "MHz"); restore("hz", "Hz"); restore("bios", "BIOS");
+    restore("stn", "STN"); restore("vsync", "VSync");
+    return text;
+}
 
 DropdownLayout build_dropdown_layout(int tab, int win_w, int win_h,
                                      const GcLaunchSelection& sel,
@@ -1195,7 +1258,7 @@ void GcUiFont::draw(int x, int y, const std::string& value,
         SDL_SetTextureAlphaMod(m_texture, c.a);
         for (int i = 0; i < limit; ++i) {
             const unsigned char raw = static_cast<unsigned char>(value[static_cast<std::size_t>(i)]);
-            const int code = std::toupper(raw) & 0x7F;
+            const int code = raw & 0x7F;
             if (code == ' ') continue;
             const SDL_Rect src{code * 6, 0, 5, 7};
             const SDL_Rect dst{x + i * 6 * scale, y, 5 * scale, 7 * scale};
@@ -1206,7 +1269,7 @@ void GcUiFont::draw(int x, int y, const std::string& value,
     SDL_SetRenderDrawColor(m_renderer, c.r, c.g, c.b, c.a);
     for (int i = 0; i < limit; ++i) {
         const unsigned char raw = static_cast<unsigned char>(value[static_cast<std::size_t>(i)]);
-        const char ch = static_cast<char>(std::toupper(raw));
+        const char ch = static_cast<char>(raw);
         if (ch == ' ') continue;
         const auto rows = glyph(ch);
         for (int row = 0; row < 7; ++row) {
@@ -1675,7 +1738,7 @@ bool gc_ui_prompt_text_modal(SDL_Window *window, SDL_Renderer *renderer,
 
 void GcTopMenuBar::show_toast(const std::string& message, double duration_sec)
 {
-    m_toast_text = message;
+    m_toast_text = ui_friendly_text(message);
     m_toast_timer = duration_sec;
 }
 
@@ -2038,9 +2101,6 @@ void GcTopMenuBar::render(SDL_Window *window, SDL_Renderer *renderer, const GcUi
             else
                 std::snprintf(fbuf, sizeof(fbuf), "%.1f FPS", host_fps);
             pill = fbuf;
-        } else if (in_launcher) {
-            pill = gc_ui_valid_firmware(selection.firmware_dir) ? "READY" : "SETUP";
-            pill_color = gc_ui_valid_firmware(selection.firmware_dir) ? accent : warning;
         }
 
         if (!pill.empty()) {
@@ -2091,12 +2151,54 @@ void GcTopMenuBar::render(SDL_Window *window, SDL_Renderer *renderer, const GcUi
             }
             const bool hovered = item.enabled && gc_ui_inside(mx, my, item.rect);
             if (hovered) gc_ui_fill(renderer, item.rect, panel_hover);
-            const GcUiColor fg = !item.enabled ? disabled
-                : (item.marked ? accent : (hovered ? ink : ink));
+
+            std::string label = item.label;
+            const bool checkbox = label.rfind("[X] ", 0) == 0 || label.rfind("[ ] ", 0) == 0;
+            const bool radio = label.rfind("(*) ", 0) == 0 || label.rfind("( ) ", 0) == 0;
+            int text_x = item.rect.x + 10;
+            int available_w = item.rect.w - 16;
+            if (checkbox || radio) {
+                label.erase(0, 4);
+                const int cx = item.rect.x + 20;
+                const int cy = item.rect.y + item.rect.h / 2;
+                const SDL_Color mark_color = item.marked ? SDL_Color{0, 103, 192, 255}
+                                                          : SDL_Color{112, 112, 112, 255};
+                SDL_SetRenderDrawColor(renderer, mark_color.r, mark_color.g,
+                                       mark_color.b, mark_color.a);
+                if (checkbox) {
+                    SDL_Rect box{cx - 6, cy - 6, 12, 12};
+                    SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+                    SDL_RenderFillRect(renderer, &box);
+                    SDL_SetRenderDrawColor(renderer, mark_color.r, mark_color.g,
+                                           mark_color.b, mark_color.a);
+                    SDL_RenderDrawRect(renderer, &box);
+                    if (item.marked) {
+                        SDL_RenderDrawLine(renderer, cx - 3, cy, cx - 1, cy + 2);
+                        SDL_RenderDrawLine(renderer, cx - 1, cy + 2, cx + 4, cy - 3);
+                    }
+                } else {
+                    constexpr int radius = 6;
+                    for (int degree = 0; degree < 360; degree += 15) {
+                        const double radians = degree * 3.14159265358979323846 / 180.0;
+                        SDL_RenderDrawPoint(renderer,
+                            cx + static_cast<int>(std::round(std::cos(radians) * radius)),
+                            cy + static_cast<int>(std::round(std::sin(radians) * radius)));
+                    }
+                    if (item.marked) {
+                        SDL_Rect dot{cx - 2, cy - 2, 5, 5};
+                        SDL_RenderFillRect(renderer, &dot);
+                    }
+                }
+                text_x = item.rect.x + 36;
+                available_w = item.rect.w - 42;
+            }
+
+            label = ui_friendly_text(label);
+            const GcUiColor fg = !item.enabled ? disabled : ink;
             const int text_h = 7 * layout.text_scale;
             const int ty = item.rect.y + (item.rect.h - text_h) / 2;
-            const int max_ch = std::max(1, (item.rect.w - 16) / (6 * layout.text_scale));
-            font.draw(item.rect.x + 10, ty, item.label, fg, layout.text_scale, max_ch);
+            const int max_ch = std::max(1, available_w / (6 * layout.text_scale));
+            font.draw(text_x, ty, label, fg, layout.text_scale, max_ch);
         }
     }
 }

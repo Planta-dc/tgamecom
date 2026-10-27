@@ -10,21 +10,22 @@ struct GcUiColor {
     Uint8 r, g, b, a;
 };
 
+/* Neutral Windows-style light chrome with a restrained system-blue accent. */
 namespace gc_ui_palette {
-constexpr GcUiColor background{13, 22, 35, 255};
-constexpr GcUiColor menubar_bg{18, 30, 45, 255};
-constexpr GcUiColor menubar_border{58, 96, 138, 255};
-constexpr GcUiColor dropdown_bg{20, 33, 49, 250};
-constexpr GcUiColor overlay_dim{8, 14, 24, 215};
-constexpr GcUiColor panel{24, 39, 56, 255};
-constexpr GcUiColor panel_light{34, 53, 72, 255};
-constexpr GcUiColor panel_hover{46, 72, 98, 255};
-constexpr GcUiColor ink{232, 241, 247, 255};
-constexpr GcUiColor muted{150, 171, 188, 255};
-constexpr GcUiColor accent{73, 211, 179, 255};
-constexpr GcUiColor blue{93, 157, 244, 255};
-constexpr GcUiColor warning{255, 190, 102, 255};
-constexpr GcUiColor disabled{67, 79, 92, 255};
+constexpr GcUiColor background{243, 243, 243, 255};
+constexpr GcUiColor menubar_bg{248, 248, 248, 255};
+constexpr GcUiColor menubar_border{218, 218, 218, 255};
+constexpr GcUiColor dropdown_bg{255, 255, 255, 255};
+constexpr GcUiColor overlay_dim{25, 25, 25, 150};
+constexpr GcUiColor panel{255, 255, 255, 255};
+constexpr GcUiColor panel_light{247, 247, 247, 255};
+constexpr GcUiColor panel_hover{232, 242, 252, 255};
+constexpr GcUiColor ink{32, 32, 32, 255};
+constexpr GcUiColor muted{96, 96, 96, 255};
+constexpr GcUiColor accent{0, 103, 192, 255};
+constexpr GcUiColor blue{210, 210, 210, 255};
+constexpr GcUiColor warning{174, 75, 0, 255};
+constexpr GcUiColor disabled{218, 218, 218, 255};
 } // namespace gc_ui_palette
 
 class GcUiFont {
@@ -121,7 +122,7 @@ public:
 
     int open_tab() const noexcept { return m_open_tab; }
     void close() noexcept { m_open_tab = -1; }
-    void show_toast(const std::string& message, double duration_sec = 2.2);
+    void show_toast(const std::string& message, double duration_sec = 5.0);
     void tick(double dt) noexcept;
 
     bool is_visible(bool in_launcher, const GcTimingOptions& timing,
