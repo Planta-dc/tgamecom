@@ -90,6 +90,7 @@ bool gc_ui_prompt_text_modal(SDL_Window *window, SDL_Renderer *renderer,
 enum class GcMenuAction {
     None = 0,
     TimingChanged,
+    VsyncToggled,
     LoadCartridgeRom,
     LoadSlot2Rom,
     EjectSlot2Rom,
@@ -135,7 +136,7 @@ public:
     void render(SDL_Window *window, SDL_Renderer *renderer, const GcUiFont& font,
                 const GcLaunchSelection& selection, bool in_launcher,
                 bool emulation_ready, bool paused, bool fast_forward,
-                bool is_fullscreen, double host_fps,
+                bool is_fullscreen, double host_fps, double emulated_lcd_hz,
                 int raw_mouse_x, int raw_mouse_y) const;
 
 private:

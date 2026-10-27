@@ -165,24 +165,30 @@ bool map_mouse_to_touch_cell(SDL_Window *window, SDL_Renderer *renderer,
 
 void update_window_title(SDL_Window *window, const GcLaunchSelection& sel,
                          bool in_launcher, bool paused, bool fast_forward,
-                         double host_fps)
+                         double host_fps, double measured_lcd_hz)
 {
     if (in_launcher) {
         SDL_SetWindowTitle(window, "Game.com Emulator — Launcher");
         return;
     }
-    char title[180];
-    const double mhz = ((static_cast<double>(GC_CPU_HZ) / 1000000.0) *
-                        static_cast<double>(sel.timing.cpu_speed_percent)) / 100.0;
+    char title[200];
+    double mhz = ((static_cast<double>(GC_CPU_HZ) / 1000000.0) *
+                  static_cast<double>(sel.timing.cpu_speed_percent)) / 100.0;
+    if (sel.timing.scale_cpu_with_lcd)
+        mhz *= (sel.timing.lcd_hz / GC_LCD_NATIVE_HZ);
     const char *state_tag = fast_forward ? " [4x TURBO]" : (paused ? " [PAUSED]" : "");
     if (host_fps > 0.5 && !paused) {
         std::snprintf(title, sizeof(title),
-                      "Game.com%s | LCD %.2f Hz | CPU %u%% (%.2f MHz) | %.0f FPS",
-                      state_tag, sel.timing.lcd_hz, sel.timing.cpu_speed_percent, mhz, host_fps);
+                      "Game.com%s | LCD %.2f Hz (%.1f/s) | CPU %u%% (%.2f MHz) | %.1f FPS%s",
+                      state_tag, sel.timing.lcd_hz,
+                      measured_lcd_hz > 0.1 ? measured_lcd_hz : sel.timing.lcd_hz,
+                      sel.timing.cpu_speed_percent, mhz, host_fps,
+                      sel.timing.vsync ? " [VSync]" : "");
     } else {
         std::snprintf(title, sizeof(title),
-                      "Game.com%s | LCD %.2f Hz | CPU %u%% (%.2f MHz)",
-                      state_tag, sel.timing.lcd_hz, sel.timing.cpu_speed_percent, mhz);
+                      "Game.com%s | LCD %.2f Hz | CPU %u%% (%.2f MHz)%s",
+                      state_tag, sel.timing.lcd_hz, sel.timing.cpu_speed_percent, mhz,
+                      sel.timing.vsync ? " [VSync]" : "");
     }
     SDL_SetWindowTitle(window, title);
 }
@@ -301,8 +307,10 @@ int gc_sdl_session_run(GcMachine& machine, standalone::Sm8521Cpu& cpu,
     SDL_SetWindowMinimumSize(window, 440, 360);
     SDL_EventState(SDL_DROPFILE, SDL_ENABLE);
 
+    const Uint32 initial_vsync_flag = selection.timing.vsync
+        ? static_cast<Uint32>(SDL_RENDERER_PRESENTVSYNC) : 0u;
     SDL_Renderer *renderer = SDL_CreateRenderer(window, -1,
-        SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+        SDL_RENDERER_ACCELERATED | initial_vsync_flag);
     if (!renderer) renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
     if (!renderer) renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_SOFTWARE);
     if (!renderer) {
@@ -312,9 +320,20 @@ int gc_sdl_session_run(GcMachine& machine, standalone::Sm8521Cpu& cpu,
         return 1;
     }
 
-    SDL_RendererInfo rinfo{};
-    const bool vsync_active = (SDL_GetRendererInfo(renderer, &rinfo) == 0) &&
-                              ((rinfo.flags & SDL_RENDERER_PRESENTVSYNC) != 0);
+    auto query_vsync = [&]() -> bool {
+        SDL_RendererInfo rinfo{};
+        return (SDL_GetRendererInfo(renderer, &rinfo) == 0) &&
+               ((rinfo.flags & SDL_RENDERER_PRESENTVSYNC) != 0);
+    };
+    bool vsync_active = query_vsync();
+
+    auto apply_vsync_setting = [&]() {
+#if SDL_VERSION_ATLEAST(2, 0, 18)
+        (void)SDL_RenderSetVSync(renderer, selection.timing.vsync ? 1 : 0);
+        vsync_active = query_vsync();
+#endif
+    };
+    apply_vsync_setting();
 
     SDL_Texture *lcd_texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888,
         SDL_TEXTUREACCESS_STREAMING, static_cast<int>(GC_LCD_WIDTH),
@@ -334,8 +353,10 @@ int gc_sdl_session_run(GcMachine& machine, standalone::Sm8521Cpu& cpu,
     cpu.set_external_vblank(true);
 
     auto apply_cpu_clock = [&]() -> std::uint32_t {
-        const double scaled = static_cast<double>(GC_CPU_HZ) *
-                              static_cast<double>(selection.timing.cpu_speed_percent) / 100.0;
+        double scaled = static_cast<double>(GC_CPU_HZ) *
+                        static_cast<double>(selection.timing.cpu_speed_percent) / 100.0;
+        if (selection.timing.scale_cpu_with_lcd)
+            scaled *= (selection.timing.lcd_hz / GC_LCD_NATIVE_HZ);
         const std::uint32_t hz = static_cast<std::uint32_t>(
             std::max(100000.0, std::min(100000000.0, std::round(scaled))));
         cpu.set_clock_hz(hz);
@@ -391,6 +412,8 @@ int gc_sdl_session_run(GcMachine& machine, standalone::Sm8521Cpu& cpu,
     apply_serial_mode(false);
 
     std::array<std::uint32_t, GC_LCD_WIDTH * GC_LCD_HEIGHT> pixels{};
+    std::array<std::uint32_t, GC_LCD_WIDTH * GC_LCD_HEIGHT> blend_scratch{};
+    std::vector<std::uint32_t> blend_accum(GC_LCD_WIDTH * GC_LCD_HEIGHT * 3u, 0u);
     std::vector<std::int16_t> audio_samples(4096u, 0);
     std::uint64_t audio_cycle_remainder = 0;
 
@@ -465,9 +488,12 @@ int gc_sdl_session_run(GcMachine& machine, standalone::Sm8521Cpu& cpu,
     const double counter_freq = static_cast<double>(
         std::max<std::uint64_t>(1u, SDL_GetPerformanceFrequency()));
     std::uint64_t last_counter = SDL_GetPerformanceCounter();
+    std::uint64_t next_present_tick = last_counter;
     double fps_timer = 0.0;
     unsigned fps_frames = 0;
+    unsigned fps_vblanks = 0;
     double measured_fps = 0.0;
+    double measured_lcd_hz = 0.0;
 
     int mouse_x = 0, mouse_y = 0;
     SDL_GetMouseState(&mouse_x, &mouse_y);
@@ -541,10 +567,16 @@ int gc_sdl_session_run(GcMachine& machine, standalone::Sm8521Cpu& cpu,
                 switch (action) {
                 case GcMenuAction::TimingChanged:
                     nominal_cpu_hz = apply_cpu_clock();
+                    next_present_tick = SDL_GetPerformanceCounter();
                     if (selection.timing.touch_mode != GC_TOUCH_HOLD_DRAG && continuous_drag_active) {
                         continuous_drag_active = false;
                         (void)gc_input_set_touch(&machine, false, 0, 0);
                     }
+                    title_dirty = true;
+                    break;
+                case GcMenuAction::VsyncToggled:
+                    apply_vsync_setting();
+                    next_present_tick = SDL_GetPerformanceCounter();
                     title_dirty = true;
                     break;
                 case GcMenuAction::LoadCartridgeRom:
@@ -781,6 +813,8 @@ int gc_sdl_session_run(GcMachine& machine, standalone::Sm8521Cpu& cpu,
                     } else if (sym == SDLK_F7) {
                         const int dir = (event.key.keysym.mod & KMOD_SHIFT) ? -1 : 1;
                         selection.timing.lcd_hz = cycle_lcd_hz_preset(selection.timing.lcd_hz, dir);
+                        nominal_cpu_hz = apply_cpu_clock();
+                        next_present_tick = SDL_GetPerformanceCounter();
                         menubar.show_toast("LCD REFRESH: " + gc_ui_format_lcd_hz(selection.timing.lcd_hz));
                     }
                     (void)gc_save_launch_selection(selection);
@@ -938,6 +972,7 @@ int gc_sdl_session_run(GcMachine& machine, standalone::Sm8521Cpu& cpu,
                         "CUSTOM LCD REFRESH HZ", "ENTER EMULATED LCD VBLANK RATE (10 - 240 HZ):",
                         selection.timing.lcd_hz, 10.0, 240.0, true, val, done)) {
                     selection.timing.lcd_hz = gc_ui_clamp_lcd_hz(val);
+                    nominal_cpu_hz = apply_cpu_clock();
                     (void)gc_save_launch_selection(selection);
                     title_dirty = true;
                     menubar.show_toast("LCD REFRESH: " + gc_ui_format_lcd_hz(selection.timing.lcd_hz));
@@ -957,6 +992,7 @@ int gc_sdl_session_run(GcMachine& machine, standalone::Sm8521Cpu& cpu,
                 }
             }
             last_counter = SDL_GetPerformanceCounter();
+            next_present_tick = last_counter;
             SDL_GetMouseState(&mouse_x, &mouse_y);
             if (done) break;
         }
@@ -978,7 +1014,7 @@ int gc_sdl_session_run(GcMachine& machine, standalone::Sm8521Cpu& cpu,
             gc_ui_fill(renderer, fw_panel, panel); gc_ui_outline(renderer, fw_panel, blue);
             gc_ui_fill(renderer, rom_panel, panel); gc_ui_outline(renderer, rom_panel, blue);
 
-            font.draw(60, 162, "1  SYSTEM FIRMWARE (INTERNAL.BIN + EXTERNAL.BIN)", ink, 2, 54);
+            font.draw(60, 162, "1  SYSTEM FIRMWARE (EXTERNAL.BIN / BOOT.ROM)", ink, 2, 54);
             font.draw(60, 194,
                       selection.firmware_dir.empty() ? "NO FIRMWARE FOLDER SELECTED" : gc_ui_short_path(selection.firmware_dir, 48),
                       cur_fw_ok ? accent : warning, 2, 50);
@@ -1015,10 +1051,11 @@ int gc_sdl_session_run(GcMachine& machine, standalone::Sm8521Cpu& cpu,
                               gc_ui_inside(mx, my, quit_btn));
 
             menubar.render(window, renderer, font, selection, true, emulation_ready,
-                           paused, false, is_fullscreen, 0.0, mouse_x, mouse_y);
+                           paused, false, is_fullscreen, 0.0, 0.0, mouse_x, mouse_y);
             gc_ui_present(renderer, vsync_active);
+            next_present_tick = SDL_GetPerformanceCounter();
             if (title_dirty) {
-                update_window_title(window, selection, true, paused, false, 0.0);
+                update_window_title(window, selection, true, paused, false, 0.0, 0.0);
                 title_dirty = false;
             }
             continue;
@@ -1026,6 +1063,7 @@ int gc_sdl_session_run(GcMachine& machine, standalone::Sm8521Cpu& cpu,
 
         /* Step active emulation when not paused. */
         unsigned vblanks_due = 0;
+        bool multi_vblank_blended = false;
         if (!paused) {
             const double pace_mult = fast_forward
                 ? 4.0 : (static_cast<double>(selection.timing.game_pace_percent) / 100.0);
@@ -1048,12 +1086,26 @@ int gc_sdl_session_run(GcMachine& machine, standalone::Sm8521Cpu& cpu,
                 while (cpu.cycles() < target) (void)cpu.step();
                 serial_link.poll(machine, cpu);
             } else {
+                const bool do_blend = (vblanks_due > 1u && vblanks_due <= 4u && !fast_forward);
+                if (do_blend) std::fill(blend_accum.begin(), blend_accum.end(), 0u);
+                unsigned blended_count = 0u;
+
                 for (unsigned v = 0; v < vblanks_due; ++v) {
                     const std::uint64_t slice_target =
                         step_start + ((total_cycles * static_cast<std::uint64_t>(v + 1u)) / vblanks_due);
                     while (cpu.cycles() < slice_target) (void)cpu.step();
                     serial_link.poll(machine, cpu);
                     cpu.trigger_vblank();
+
+                    if (do_blend && gc_lcd_render_argb(&machine, blend_scratch.data(), GC_LCD_WIDTH)) {
+                        for (std::size_t px = 0; px < blend_scratch.size(); ++px) {
+                            const std::uint32_t c = blend_scratch[px];
+                            blend_accum[px * 3u + 0u] += (c >> 16) & 0xFFu;
+                            blend_accum[px * 3u + 1u] += (c >> 8) & 0xFFu;
+                            blend_accum[px * 3u + 2u] += c & 0xFFu;
+                        }
+                        ++blended_count;
+                    }
 
                     if (tap_pulse_active) {
                         ++tap_vblanks_total;
@@ -1069,6 +1121,16 @@ int gc_sdl_session_run(GcMachine& machine, standalone::Sm8521Cpu& cpu,
                             (void)gc_input_set_touch(&machine, false, 0, 0);
                         }
                     }
+                }
+
+                if (do_blend && blended_count > 0u) {
+                    for (std::size_t px = 0; px < pixels.size(); ++px) {
+                        const std::uint32_t r = blend_accum[px * 3u + 0u] / blended_count;
+                        const std::uint32_t g = blend_accum[px * 3u + 1u] / blended_count;
+                        const std::uint32_t b = blend_accum[px * 3u + 2u] / blended_count;
+                        pixels[px] = 0xFF000000u | (r << 16) | (g << 8) | b;
+                    }
+                    multi_vblank_blended = true;
                 }
             }
             const std::uint64_t step_stop = cpu.cycles();
@@ -1104,7 +1166,7 @@ int gc_sdl_session_run(GcMachine& machine, standalone::Sm8521Cpu& cpu,
         }
 
         if (vblanks_due > 0u || !lcd_texture_initialized) {
-            if (!gc_lcd_render_argb(&machine, pixels.data(), GC_LCD_WIDTH)) {
+            if (!multi_vblank_blended && !gc_lcd_render_argb(&machine, pixels.data(), GC_LCD_WIDTH)) {
                 std::fprintf(stderr, "Could not render Game.com LCD frame.\n");
                 done = true;
                 break;
@@ -1126,28 +1188,58 @@ int gc_sdl_session_run(GcMachine& machine, standalone::Sm8521Cpu& cpu,
         SDL_RenderCopy(renderer, lcd_texture, nullptr, &lcd_dst);
 
         menubar.render(window, renderer, font, selection, false, emulation_ready,
-                       paused, fast_forward, is_fullscreen, measured_fps,
+                       paused, fast_forward, is_fullscreen, measured_fps, measured_lcd_hz,
                        mouse_x, mouse_y);
         SDL_RenderPresent(renderer);
 
         if (!vsync_active) {
-            const double frame_elapsed_ms =
-                (static_cast<double>(SDL_GetPerformanceCounter() - tick_begin) * 1000.0) /
-                counter_freq;
-            if (frame_elapsed_ms < 4.0)
-                SDL_Delay(static_cast<Uint32>(4.0 - frame_elapsed_ms));
+            if (paused) {
+                SDL_Delay(8);
+                next_present_tick = SDL_GetPerformanceCounter();
+            } else if (fast_forward) {
+                const double elapsed_ms =
+                    (static_cast<double>(SDL_GetPerformanceCounter() - tick_begin) * 1000.0) /
+                    counter_freq;
+                if (elapsed_ms < 2.0) SDL_Delay(1);
+                next_present_tick = SDL_GetPerformanceCounter();
+            } else {
+                const double pace_mult =
+                    static_cast<double>(selection.timing.game_pace_percent) / 100.0;
+                const double target_hz =
+                    std::max(10.0, std::min(240.0, selection.timing.lcd_hz * pace_mult));
+                const std::uint64_t frame_ticks = static_cast<std::uint64_t>(
+                    std::max(1.0, std::round(counter_freq / target_hz)));
+                next_present_tick += frame_ticks;
+                const std::uint64_t now_tick = SDL_GetPerformanceCounter();
+                if (now_tick > next_present_tick + frame_ticks * 2u) {
+                    next_present_tick = now_tick;
+                } else {
+                    while (true) {
+                        const std::uint64_t cur = SDL_GetPerformanceCounter();
+                        if (cur >= next_present_tick) break;
+                        const double rem_ms =
+                            (static_cast<double>(next_present_tick - cur) * 1000.0) / counter_freq;
+                        if (rem_ms > 2.0)
+                            SDL_Delay(static_cast<Uint32>(rem_ms - 1.2));
+                    }
+                }
+            }
         }
 
         fps_timer += dt;
         ++fps_frames;
+        fps_vblanks += vblanks_due;
         if (fps_timer >= 0.5) {
             measured_fps = static_cast<double>(fps_frames) / fps_timer;
+            measured_lcd_hz = static_cast<double>(fps_vblanks) / fps_timer;
             fps_timer = 0.0;
             fps_frames = 0;
+            fps_vblanks = 0;
             title_dirty = true;
         }
         if (title_dirty) {
-            update_window_title(window, selection, false, paused, fast_forward, measured_fps);
+            update_window_title(window, selection, false, paused, fast_forward,
+                                measured_fps, measured_lcd_hz);
             title_dirty = false;
         }
     }

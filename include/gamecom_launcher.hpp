@@ -21,6 +21,8 @@ struct GcTimingOptions {
     double lcd_hz = 5000000.0 / 66240.0; /* Native SM8521 LCDC VBlank (~75.483 Hz = 5 MHz / (320 * 207)). */
     unsigned cpu_speed_percent = 100;    /* Emulated SM8521 CPU clock scale (% of 5.000 MHz phi0). */
     unsigned game_pace_percent = 100;    /* Overall emulation pace multiplier (%, scales CPU + LCD together). */
+    bool vsync = false;                  /* Off by default so host frame rate paces directly to lcd_hz. */
+    bool scale_cpu_with_lcd = false;     /* Optional: scale SM8521 CPU/TIM1 speed proportionally with lcd_hz. */
     GcTouchMode touch_mode = GC_TOUCH_SINGLE_TAP;
     bool audio_muted = false;
     unsigned audio_volume_percent = 100;

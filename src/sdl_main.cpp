@@ -45,12 +45,14 @@ void print_usage(const char *program)
               << " [--launcher] [--firmware DIR] [--rom SLOT1.bin] [--rom2 SLOT2.bin]"
                  " [--nvram FILE] [--warm-boot]"
                  " [--modem] [--phonebook FILE] [--link-listen PORT] [--link-connect HOST:PORT]"
-                 " [--lcd-hz HZ] [--speed PERCENT] [--pace PERCENT]"
+                 " [--lcd-hz HZ] [--vsync on|off] [--lock-hz] [--speed PERCENT] [--pace PERCENT]"
                  " [--touch-mode tap|debounce|hold] [--demo]\n"
                  "With no options, opens the interactive launcher.\n"
                  "Firmware DIR must contain external.bin (or boot.rom); internal.bin is optional.\n"
                  "Timing, input, NVRAM & serial options (also adjustable live in the top menu bar):\n"
                  "  --lcd-hz HZ           Emulated LCD VBlank refresh rate, 10..240 (default: 75.48 HW)\n"
+                 "  --vsync on|off        Lock host presentation to monitor VSync (default: off = pace to LCD Hz)\n"
+                 "  --lock-hz             Scale SM8521 CPU/timers proportionally when LCD Hz changes\n"
                  "  --speed PERCENT       Emulated SM8521 CPU clock percent of 5.00 MHz, 25..800 (default: 100)\n"
                  "  --pace PERCENT        Overall emulation speed multiplier, 25..400 (default: 100)\n"
                  "  --touch-mode MODE     tap (default, 1-scan pulse), debounce (2-scan), or hold\n"
@@ -120,6 +122,18 @@ int main(int argc, char **argv)
                 return 2;
             }
             selection.timing.lcd_hz = val;
+        } else if (std::strcmp(argv[i], "--vsync") == 0 && i + 1 < argc) {
+            const char *mode = argv[++i];
+            if (std::strcmp(mode, "on") == 0 || std::strcmp(mode, "1") == 0)
+                selection.timing.vsync = true;
+            else if (std::strcmp(mode, "off") == 0 || std::strcmp(mode, "0") == 0)
+                selection.timing.vsync = false;
+            else {
+                std::cerr << "Invalid --vsync value (expected on or off).\n";
+                return 2;
+            }
+        } else if (std::strcmp(argv[i], "--lock-hz") == 0) {
+            selection.timing.scale_cpu_with_lcd = true;
         } else if (std::strcmp(argv[i], "--speed") == 0 && i + 1 < argc) {
             char *end = nullptr;
             const unsigned long val = std::strtoul(argv[++i], &end, 10);

@@ -802,10 +802,10 @@ std::array<TabSpec, 5> build_menubar_tabs(const GcLaunchSelection& sel, int win_
 {
     const int scale = (win_w > 0 && win_w < 700) ? 1 : 2;
     char lcd_buf[32];
-    if (std::fabs(sel.timing.lcd_hz - std::round(sel.timing.lcd_hz)) < 0.05)
+    if (std::fabs(sel.timing.lcd_hz - std::round(sel.timing.lcd_hz)) < 0.005)
         std::snprintf(lcd_buf, sizeof(lcd_buf), "LCD:%.0fHZ", sel.timing.lcd_hz);
     else
-        std::snprintf(lcd_buf, sizeof(lcd_buf), "LCD:%.1fHZ", sel.timing.lcd_hz);
+        std::snprintf(lcd_buf, sizeof(lcd_buf), "LCD:%.2fHZ", sel.timing.lcd_hz);
 
     char cpu_buf[36];
     if (sel.timing.game_pace_percent != 100u) {
@@ -843,6 +843,8 @@ enum class ItemOp {
     SetVolume,
     ToggleIntegerScale,
     ToggleAutoHideBar,
+    ToggleVsync,
+    ToggleScaleCpuWithLcd,
     SetSerialMode,
     ToggleWarmBootSeed
 };
@@ -992,12 +994,12 @@ DropdownLayout build_dropdown_layout(int tab, int win_w, int win_h,
 
         struct Preset { double hz; const char *name; };
         static constexpr std::array<Preset, 8> presets = {{
+            {GC_LCD_NATIVE_HZ, "75.48 HZ (HW NATIVE)"},
+            {60.0, "60.0 HZ  (60FPS DISPLAY)"},
+            {59.732155, "59.73 HZ (MAME LEGACY)"},
             {30.0, "30.0 HZ  (HALF RATE)"},
             {50.0, "50.0 HZ  (PAL)"},
-            {59.732155, "59.73 HZ (MAME LEGACY)"},
-            {60.0, "60.0 HZ  (TV / VSYNC)"},
             {75.0, "75.0 HZ"},
-            {GC_LCD_NATIVE_HZ, "75.48 HZ (HW NATIVE)"},
             {90.0, "90.0 HZ"},
             {120.0, "120.0 HZ"}
         }};
@@ -1007,6 +1009,14 @@ DropdownLayout build_dropdown_layout(int tab, int win_w, int win_h,
                      true, active, false, ItemOp::SetLcdHz, GcMenuAction::None, p.hz);
         }
         add_div();
+        add_item(sel.timing.scale_cpu_with_lcd
+                     ? "[X] LOCK GAME SPEED TO LCD HZ"
+                     : "[ ] LOCK GAME SPEED TO LCD HZ",
+                 true, sel.timing.scale_cpu_with_lcd, true, ItemOp::ToggleScaleCpuWithLcd);
+        add_item(sel.timing.vsync
+                     ? "[X] HOST VSYNC (MONITOR LOCK)"
+                     : "[ ] HOST VSYNC (PACE TO LCD HZ)",
+                 true, sel.timing.vsync, true, ItemOp::ToggleVsync);
         add_item("TYPE EXACT LCD HZ...", true, false, false,
                  ItemOp::Action, GcMenuAction::PromptCustomLcdHz);
     } else if (tab == 2) {
@@ -1100,6 +1110,8 @@ DropdownLayout build_dropdown_layout(int tab, int win_w, int win_h,
                      GcMenuAction::None, static_cast<double>(vol));
         }
         add_div();
+        add_item(sel.timing.vsync ? "[X] HOST VSYNC" : "[ ] HOST VSYNC",
+                 true, sel.timing.vsync, true, ItemOp::ToggleVsync);
         add_item(sel.timing.integer_scaling ? "[X] INTEGER PIXEL SCALING" : "[ ] INTEGER PIXEL SCALING",
                  true, sel.timing.integer_scaling, true, ItemOp::ToggleIntegerScale);
         add_item(sel.timing.auto_hide_menubar ? "[X] AUTO-HIDE TOP BAR IN GAME" : "[ ] AUTO-HIDE TOP BAR IN GAME",
@@ -1861,8 +1873,25 @@ bool GcTopMenuBar::handle_event(const SDL_Event& event, SDL_Window *window,
                     selection.timing.lcd_hz = GC_LCD_NATIVE_HZ;
                     selection.timing.cpu_speed_percent = 100u;
                     selection.timing.game_pace_percent = 100u;
+                    selection.timing.scale_cpu_with_lcd = false;
                     (void)gc_save_launch_selection(selection);
                     show_toast("TIMING RESET: 75.48 HZ HW / 100% (5.00 MHZ) / 1.0X");
+                    out_action = GcMenuAction::TimingChanged;
+                    break;
+                case ItemOp::ToggleVsync:
+                    selection.timing.vsync = !selection.timing.vsync;
+                    (void)gc_save_launch_selection(selection);
+                    show_toast(selection.timing.vsync
+                        ? "HOST VSYNC ON (LOCKED TO DISPLAY HZ)"
+                        : "HOST VSYNC OFF (PACED TO EMULATED LCD HZ)");
+                    out_action = GcMenuAction::VsyncToggled;
+                    break;
+                case ItemOp::ToggleScaleCpuWithLcd:
+                    selection.timing.scale_cpu_with_lcd = !selection.timing.scale_cpu_with_lcd;
+                    (void)gc_save_launch_selection(selection);
+                    show_toast(selection.timing.scale_cpu_with_lcd
+                        ? "GAME/TIMER SPEED LOCKED TO LCD HZ"
+                        : "HW INDEPENDENT 5.00 MHZ CPU + TIMERS");
                     out_action = GcMenuAction::TimingChanged;
                     break;
                 case ItemOp::SetTouchMode: {
@@ -1941,7 +1970,7 @@ bool GcTopMenuBar::handle_event(const SDL_Event& event, SDL_Window *window,
 void GcTopMenuBar::render(SDL_Window *window, SDL_Renderer *renderer, const GcUiFont& font,
                           const GcLaunchSelection& selection, bool in_launcher,
                           bool emulation_ready, bool paused, bool fast_forward,
-                          bool is_fullscreen, double host_fps,
+                          bool is_fullscreen, double host_fps, double emulated_lcd_hz,
                           int raw_mouse_x, int raw_mouse_y) const
 {
     int win_w = 0, win_h = 0, mx = 0, my = 0;
@@ -1976,8 +2005,11 @@ void GcTopMenuBar::render(SDL_Window *window, SDL_Renderer *renderer, const GcUi
             pill = "PAUSED";
             pill_color = warning;
         } else if (!in_launcher && host_fps > 0.5) {
-            char fbuf[24];
-            std::snprintf(fbuf, sizeof(fbuf), "%.0f FPS", host_fps);
+            char fbuf[36];
+            if (emulated_lcd_hz > 0.5 && std::fabs(emulated_lcd_hz - host_fps) >= 1.5)
+                std::snprintf(fbuf, sizeof(fbuf), "%.1fHZ/%.0fFPS", emulated_lcd_hz, host_fps);
+            else
+                std::snprintf(fbuf, sizeof(fbuf), "%.1f FPS", host_fps);
             pill = fbuf;
         } else if (in_launcher) {
             pill = gc_ui_valid_firmware(selection.firmware_dir) ? "READY" : "SETUP";
@@ -1988,7 +2020,7 @@ void GcTopMenuBar::render(SDL_Window *window, SDL_Renderer *renderer, const GcUi
             const int pw = static_cast<int>(pill.size()) * 12;
             const int px = win_w - pw - 12;
             if (px > right_limit + 12) {
-                font.draw(px, 9, pill, pill_color, 2, 16);
+                font.draw(px, 9, pill, pill_color, 2, 24);
             }
         }
     }
@@ -2120,6 +2152,8 @@ GcLaunchSelection gc_load_launch_selection()
 {
     GcLaunchSelection selection;
     std::ifstream input(launcher_state_file());
+    const bool had_file = input.good();
+    unsigned config_version = 1u;
     std::string line;
     while (std::getline(input, line)) {
         if (line.empty() || line[0] == '#') continue;
@@ -2129,7 +2163,10 @@ GcLaunchSelection gc_load_launch_selection()
         std::string value = line.substr(equals + 1);
         trim_string(name);
         trim_string(value);
-        if (name == "firmware_dir") selection.firmware_dir = value;
+        if (name == "config_version") {
+            const unsigned long v = std::strtoul(value.c_str(), nullptr, 10);
+            if (v > 0ul) config_version = static_cast<unsigned>(v);
+        } else if (name == "firmware_dir") selection.firmware_dir = value;
         else if (name == "cartridge_path") selection.cartridge_path = value;
         else if (name == "cartridge2_path") selection.cartridge2_path = value;
         else if (name == "nvram_path") selection.nvram_path = value;
@@ -2149,6 +2186,10 @@ GcLaunchSelection gc_load_launch_selection()
             const double parsed = std::strtod(value.c_str(), &end);
             if (end && end != value.c_str())
                 selection.timing.lcd_hz = gc_ui_clamp_lcd_hz(parsed);
+        } else if (name == "vsync") {
+            selection.timing.vsync = (value == "1" || value == "true");
+        } else if (name == "scale_cpu_with_lcd") {
+            selection.timing.scale_cpu_with_lcd = (value == "1" || value == "true");
         } else if (name == "cpu_speed_percent") {
             char *end = nullptr;
             const unsigned long parsed = std::strtoul(value.c_str(), &end, 10);
@@ -2179,6 +2220,16 @@ GcLaunchSelection gc_load_launch_selection()
             selection.timing.auto_hide_menubar = (value == "1" || value == "true");
         }
     }
+    input.close();
+
+    /* Migrate legacy v1 launcher.ini files that saved MAME's 59.73 Hz default
+       before hardware-native 75.483 Hz became the default. */
+    if (had_file && config_version < 2u) {
+        if (std::fabs(selection.timing.lcd_hz - 59.732155) < 0.08)
+            selection.timing.lcd_hz = GC_LCD_NATIVE_HZ;
+        (void)gc_save_launch_selection(selection);
+    }
+
     if (!selection.cartridge_path.empty()) {
         std::error_code ec;
         if (!fs::is_regular_file(selection.cartridge_path, ec) || ec)
@@ -2206,6 +2257,7 @@ bool gc_save_launch_selection(const GcLaunchSelection& selection)
     std::ofstream output(path, std::ios::trunc);
     if (!output) return false;
     output << "# Game.com launcher paths, timing, touch, audio, and view settings.\n";
+    output << "config_version=2\n";
     output << "firmware_dir=" << selection.firmware_dir << '\n';
     output << "cartridge_path=" << selection.cartridge_path << '\n';
     output << "cartridge2_path=" << selection.cartridge2_path << '\n';
@@ -2215,6 +2267,8 @@ bool gc_save_launch_selection(const GcLaunchSelection& selection)
     output << "serial_endpoint=" << selection.serial_endpoint << '\n';
     output << "phonebook_path=" << selection.phonebook_path << '\n';
     output << "lcd_hz=" << selection.timing.lcd_hz << '\n';
+    output << "vsync=" << (selection.timing.vsync ? 1 : 0) << '\n';
+    output << "scale_cpu_with_lcd=" << (selection.timing.scale_cpu_with_lcd ? 1 : 0) << '\n';
     output << "cpu_speed_percent=" << selection.timing.cpu_speed_percent << '\n';
     output << "game_pace_percent=" << selection.timing.game_pace_percent << '\n';
     output << "touch_mode=" << static_cast<unsigned>(selection.timing.touch_mode) << '\n';
@@ -2458,7 +2512,7 @@ bool gc_sdl_launcher_run(GcLaunchSelection& selection, GcInputBindings& bindings
         gc_ui_fill(renderer, fw_panel, panel); gc_ui_outline(renderer, fw_panel, blue);
         gc_ui_fill(renderer, rom_panel, panel); gc_ui_outline(renderer, rom_panel, blue);
 
-        font.draw(60, 162, "1  SYSTEM FIRMWARE (INTERNAL.BIN + EXTERNAL.BIN)", ink, 2, 54);
+        font.draw(60, 162, "1  SYSTEM FIRMWARE (EXTERNAL.BIN / BOOT.ROM)", ink, 2, 54);
         font.draw(60, 194,
                   selection.firmware_dir.empty() ? "NO FIRMWARE FOLDER SELECTED" : gc_ui_short_path(selection.firmware_dir, 52),
                   firmware_ok ? accent : warning, 2, 54);
@@ -2488,7 +2542,7 @@ bool gc_sdl_launcher_run(GcLaunchSelection& selection, GcInputBindings& bindings
                           gc_ui_inside(mx, my, quit_button));
 
         menubar.render(window, renderer, font, selection, true, false, false, false,
-                       is_fullscreen, 0.0, mouse_x, mouse_y);
+                       is_fullscreen, 0.0, 0.0, mouse_x, mouse_y);
         gc_ui_present(renderer, vsync_active);
     }
 

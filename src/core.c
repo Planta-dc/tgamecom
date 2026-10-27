@@ -831,15 +831,15 @@ void gc_synthesize_boot_rom(GcMachine *machine)
        2. Reset entry (0x1020) initializes core SFRs/SP, maps external BIOS
           banks (MMU1=2, MMU2=4, MMU4=3), and branches to external BIOS 0x2054. */
     static const struct { uint8_t vec_offset; uint16_t ext_target; } k_vectors[9] = {
-        { 0x02u, 0x2039u }, /* DMA */
-        { 0x06u, 0x203Cu }, /* TIM0 */
-        { 0x08u, 0x203Fu }, /* EXT */
+        { 0x02u, 0x2039u }, /* TIM0 */
+        { 0x06u, 0x203Cu }, /* EXT */
+        { 0x08u, 0x203Fu }, /* UART */
         { 0x0Eu, 0x2042u }, /* LCDC */
         { 0x12u, 0x2045u }, /* TIM1 */
-        { 0x16u, 0x2048u }, /* UART */
+        { 0x16u, 0x2048u }, /* CLKT */
         { 0x1Au, 0x204Bu }, /* PIO */
         { 0x1Cu, 0x204Eu }, /* WDT */
-        { 0x1Eu, 0x2051u }  /* NMI / CLKT */
+        { 0x1Eu, 0x2051u }  /* NMI / SWI */
     };
     const uint16_t iret_stub = 0x10A0u;
     for (unsigned off = 0; off < 0x20u; off += 2u) {
