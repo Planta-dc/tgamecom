@@ -100,6 +100,8 @@ GTK3 is optional. Without it, Linux uses the asynchronous host dialog when avail
 
 `gamecom-boot` accepts a firmware directory, an optional raw cartridge path (`-` means no cartridge), an emulation-step budget, and an optional PPM output path. Its scripted `--touch step column row duration` and `--button step name duration` events use CPU steps; overlapping touch presses are not supported. The touch grid is approximate.
 
+For boot investigation, it supports repeatable PC breakpoints (`--break ADDRESS`), a stop on the first mapped cartridge instruction (`--break-cart`), a write watchpoint (`--watch ADDRESS`), handoff tracing (`--trace-boot`), and a post-run CPU-visible memory dump (`--dump ADDRESS LENGTH`). Addresses are hexadecimal, with an optional `0x` prefix; dump length is decimal. The handoff trace reports MMU bank and boot-overlay changes, P3 slot selection, and cartridge fetches with their physical ROM offsets. Breakpoints stop before the matching instruction; a write watchpoint stops after the writing instruction. Example: `./gamecom-boot firmware /path/to/game.bin 80000000 --trace-boot --break-cart --dump E000 128`. Use `--watch 0024` separately to stop on the BIOS's MMU0 write, or `--break 2054` to stop at the external BIOS entry.
+
 The SDL executable also accepts `--rom2`, `--nvram`, `--warm-boot`, `--modem`, `--phonebook`, `--link-listen`, `--link-connect`, `--lcd-hz`, `--vsync`, `--speed`, `--pace`, `--palette`, and `--touch-mode`. Run `./gamecom-sdl --help` for the complete options and defaults.
 
 ## Desktop controls
