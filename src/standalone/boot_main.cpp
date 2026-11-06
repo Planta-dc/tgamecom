@@ -11,6 +11,7 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -26,6 +27,36 @@ static bool parse_decimal_u64(const char *text, std::uint64_t& value)
     }
     value = parsed;
     return true;
+}
+
+static bool parse_hex_u16(const char *text, std::uint16_t& value)
+{
+    if (!text || !*text) return false;
+    if (text[0] == '0' && (text[1] == 'x' || text[1] == 'X')) text += 2;
+    if (!*text) return false;
+    std::uint32_t parsed = 0;
+    unsigned digits = 0;
+    for (const char *p = text; *p; ++p) {
+        unsigned digit;
+        if (*p >= '0' && *p <= '9') digit = static_cast<unsigned>(*p - '0');
+        else if (*p >= 'a' && *p <= 'f') digit = static_cast<unsigned>(*p - 'a' + 10);
+        else if (*p >= 'A' && *p <= 'F') digit = static_cast<unsigned>(*p - 'A' + 10);
+        else return false;
+        if (++digits > 4u) return false;
+        parsed = (parsed << 4) | digit;
+    }
+    value = static_cast<std::uint16_t>(parsed);
+    return true;
+}
+
+static bool is_cartridge_fetch(const GcMachine& machine, std::uint16_t pc,
+                               unsigned& window, std::uint8_t& bank)
+{
+    if (pc < 0x1000u || pc >= 0xA000u) return false;
+    if (pc < 0x2000u && machine.bus.boot_enabled) return false;
+    window = static_cast<unsigned>(pc >> 13);
+    bank = machine.bus.mapped_bank[window];
+    return machine.bus.cart_active && bank >= 0x20u;
 }
 
 static bool parse_button_name(const char *text, GcButton& button)
@@ -129,16 +160,18 @@ struct TraceEntry {
     std::uint8_t opcode = 0;
     std::uint16_t next_pc = 0;
     std::uint64_t cycles = 0;
+    std::array<char, 128> disassembly{};
 };
 
 int main(int argc, char **argv)
 {
     if (argc < 2 || argc > 128) {
-        std::cerr << "Usage: gamecom-boot <firmware-dir> [cartridge.bin|-] [step-limit] [frame.ppm] "
-                     "[--touch step column row duration ...] [--button step name duration ...]\n"
-                     "Default step limit: 20000000; both event options may be repeated. Button names: up/down/left/right/menu/pause/sound/a/b/c/d/power\n"
-                     "Example: gamecom-boot firmware Centipede.bin 80000000 frame.ppm "
-                     "--touch 10000000 2 3 300000 --button 41000000 a 300000 --button 68000000 a 300000\n";
+        std::cerr << "Usage: gamecom-boot <firmware-dir> [cartridge.bin|-] [step-limit] [frame.ppm] [options]\n"
+                     "Events: --touch step column row duration; --button step name duration (repeatable)\n"
+                     "Debug: --break PC (repeatable), --break-cart, --watch ADDRESS, --trace-boot, --dump ADDRESS LENGTH\n"
+                     "Addresses are hexadecimal (optional 0x); dump length is decimal. Steps are CPU steps, not cycles.\n"
+                     "Example: gamecom-boot firmware Centipede.bin 80000000 --trace-boot "
+                     "--break-cart --dump E000 128 --touch 10000000 2 3 300000\n";
         return 2;
     }
 
@@ -159,6 +192,14 @@ int main(int argc, char **argv)
         frame_path = argv[optional_arg++];
     std::vector<TouchEvent> touch_events;
     std::vector<ButtonEvent> button_events;
+    std::vector<std::uint16_t> breakpoints;
+    bool break_on_cart = false;
+    bool trace_boot = false;
+    bool watch_set = false;
+    std::uint16_t watch_address = 0;
+    bool dump_set = false;
+    std::uint16_t dump_address = 0;
+    std::uint32_t dump_length = 0;
     while (optional_arg < argc) {
         const std::string option(argv[optional_arg]);
         if (option == "--rom2" && argc - optional_arg >= 2) {
@@ -170,6 +211,40 @@ int main(int argc, char **argv)
         } else if (option == "--warm-boot") {
             warm_boot = true;
             ++optional_arg;
+        } else if (option == "--break" && argc - optional_arg >= 2) {
+            std::uint16_t address = 0;
+            if (!parse_hex_u16(argv[optional_arg + 1], address) ||
+                breakpoints.size() >= GC_MAX_BREAKPOINTS) {
+                std::cerr << "Invalid breakpoint address or too many breakpoints (max "
+                          << GC_MAX_BREAKPOINTS << ").\n";
+                return 2;
+            }
+            breakpoints.push_back(address);
+            optional_arg += 2;
+        } else if (option == "--break-cart") {
+            break_on_cart = true;
+            ++optional_arg;
+        } else if (option == "--trace-boot") {
+            trace_boot = true;
+            ++optional_arg;
+        } else if (option == "--watch" && argc - optional_arg >= 2) {
+            if (watch_set || !parse_hex_u16(argv[optional_arg + 1], watch_address)) {
+                std::cerr << "Use one --watch address (hexadecimal).\n";
+                return 2;
+            }
+            watch_set = true;
+            optional_arg += 2;
+        } else if (option == "--dump" && argc - optional_arg >= 3) {
+            std::uint64_t length = 0;
+            if (dump_set || !parse_hex_u16(argv[optional_arg + 1], dump_address) ||
+                !parse_decimal_u64(argv[optional_arg + 2], length) || length == 0 ||
+                length > 0x10000u || length > 0x10000u - dump_address) {
+                std::cerr << "Use one --dump HEX_ADDRESS DECIMAL_LENGTH wholly within 64 KiB.\n";
+                return 2;
+            }
+            dump_set = true;
+            dump_length = static_cast<std::uint32_t>(length);
+            optional_arg += 3;
         } else if (option == "--touch" && argc - optional_arg >= 5) {
             TouchEvent event;
             std::uint64_t column = 0, row = 0;
@@ -266,10 +341,23 @@ int main(int argc, char **argv)
     if (warm_boot) gc_nvram_seed_warm_boot(machine.get());
 
     gc_machine_reset(machine.get());
+    if (watch_set) {
+        machine->bus.watch_enabled = true;
+        machine->bus.watch_hit = false;
+        machine->bus.watch_address = watch_address;
+    }
     standalone::Sm8521Cpu cpu(*machine);
     std::cout << "Game.com firmware boot probe\n"
               << "Reset PC: 0x1020; firmware loaded; cartridge: "
               << (argc >= 3 && std::string(argv[2]) != "-" ? argv[2] : "none") << '\n';
+    for (std::uint16_t address : breakpoints)
+        std::cout << "Execution breakpoint: 0x" << std::hex << std::setw(4)
+                  << std::setfill('0') << address << std::dec << '\n';
+    if (break_on_cart) std::cout << "Execution breakpoint: first cartridge instruction\n";
+    if (watch_set)
+        std::cout << "Write watchpoint: 0x" << std::hex << std::setw(4)
+                  << std::setfill('0') << watch_address << std::dec << '\n';
+    if (trace_boot) std::cout << "Boot handoff tracing enabled\n";
     for (const TouchEvent& event : touch_events)
         std::cout << "Scheduled stylus press: step " << event.start << ", column "
                   << event.column << ", row " << event.row << ", duration "
@@ -282,6 +370,11 @@ int main(int argc, char **argv)
     std::array<TraceEntry, 32> tail{};
     std::size_t tail_pos = 0;
     std::uint64_t steps = 0;
+    bool debugger_stop = false;
+    std::string debug_stop_reason;
+    bool previous_fetch_cart = false;
+    std::uint8_t previous_fetch_bank = 0;
+    std::uint8_t previous_fetch_slot = 0;
     while (steps < instruction_limit) {
         for (TouchEvent& event : touch_events) {
             if (event.active && steps == event.end) {
@@ -303,15 +396,151 @@ int main(int argc, char **argv)
                 event.active = false;
             }
         }
-        const std::uint64_t instructions_before = cpu.instructions();
+
         const std::uint16_t pc = cpu.pc();
+        unsigned fetch_window = 0;
+        std::uint8_t fetch_bank = 0;
+        const bool fetch_cart = is_cartridge_fetch(*machine, pc, fetch_window, fetch_bank);
+        if ((trace_boot || break_on_cart) && fetch_cart &&
+            (!previous_fetch_cart || previous_fetch_bank != fetch_bank ||
+             previous_fetch_slot != machine->bus.active_slot)) {
+            std::cout << "CART FETCH at step " << steps << ", instruction "
+                      << cpu.instructions() << ", cycle " << cpu.cycles()
+                      << ": PC=0x" << std::hex << std::setw(4) << std::setfill('0') << pc
+                      << " window=MMU" << std::dec << fetch_window
+                      << " bank=0x" << std::hex << std::setw(2)
+                      << static_cast<unsigned>(fetch_bank)
+                      << " slot=" << std::dec << static_cast<unsigned>(machine->bus.active_slot)
+                      << " ROM-offset=0x" << std::hex << std::setw(6)
+                      << ((static_cast<unsigned>(fetch_bank) << 13) | (pc & 0x1FFFu))
+                      << std::setfill(' ') << '\n';
+        }
+        previous_fetch_cart = fetch_cart;
+        if (fetch_cart) {
+            previous_fetch_bank = fetch_bank;
+            previous_fetch_slot = machine->bus.active_slot;
+        }
+
+        bool hit_breakpoint = false;
+        for (std::uint16_t address : breakpoints) {
+            if (pc == address) {
+                std::ostringstream reason;
+                reason << "PC breakpoint at 0x" << std::hex << std::setw(4)
+                       << std::setfill('0') << pc;
+                debug_stop_reason = reason.str();
+                hit_breakpoint = true;
+                break;
+            }
+        }
+        if (!hit_breakpoint && break_on_cart && fetch_cart) {
+            std::ostringstream reason;
+            reason << "first cartridge instruction at PC 0x" << std::hex
+                   << std::setw(4) << std::setfill('0') << pc;
+            debug_stop_reason = reason.str();
+            hit_breakpoint = true;
+        }
+        if (hit_breakpoint) {
+            debugger_stop = true;
+            break;
+        }
+
+        const std::array<std::uint8_t, 5> old_mmu = {
+            machine->bus.mapped_bank[0], machine->bus.mapped_bank[1],
+            machine->bus.mapped_bank[2], machine->bus.mapped_bank[3],
+            machine->bus.mapped_bank[4]
+        };
+        const std::uint8_t old_p3 = machine->bus.pio_output_latch[3];
+        const bool old_boot_enabled = machine->bus.boot_enabled;
+        const bool old_cart_active = machine->bus.cart_active;
+        const std::uint8_t old_slot = machine->bus.active_slot;
+        machine->bus.watch_hit = false;
+        const std::uint64_t instructions_before = cpu.instructions();
         const std::uint8_t opcode = gc_bus_read(machine.get(), pc);
+        std::array<char, 128> captured_disassembly{};
+        if (trace_boot || break_on_cart || watch_set || !breakpoints.empty())
+            (void)gc_disassemble(machine.get(), pc, captured_disassembly.data(),
+                                 captured_disassembly.size());
         const std::uint64_t before = cpu.cycles();
         (void)cpu.step();
         ++steps;
-        if (cpu.instructions() == instructions_before) continue; /* HALT idle cycle */
-        const TraceEntry entry{cpu.instructions() - 1, pc, opcode, cpu.pc(),
-                               cpu.cycles() - before};
+
+        if (trace_boot) {
+            bool changed = false;
+            for (unsigned i = 0; i < old_mmu.size(); ++i) {
+                if (old_mmu[i] == machine->bus.mapped_bank[i]) continue;
+                if (!changed) {
+                    std::cout << "BOOT STATE at step " << steps << ", cycle " << cpu.cycles()
+                              << ", PC 0x" << std::hex << std::setw(4) << std::setfill('0')
+                              << pc << " -> 0x" << std::setw(4) << cpu.pc() << std::dec << ":\n";
+                    changed = true;
+                }
+                std::cout << "  MMU" << i << " bank 0x" << std::hex << std::setw(2)
+                          << static_cast<unsigned>(old_mmu[i]) << " -> 0x" << std::setw(2)
+                          << static_cast<unsigned>(machine->bus.mapped_bank[i]) << std::dec << '\n';
+            }
+            if (old_p3 != machine->bus.pio_output_latch[3]) {
+                if (!changed) {
+                    std::cout << "BOOT STATE at step " << steps << ", cycle " << cpu.cycles()
+                              << ", PC 0x" << std::hex << std::setw(4) << std::setfill('0')
+                              << pc << " -> 0x" << std::setw(4) << cpu.pc() << std::dec << ":\n";
+                    changed = true;
+                }
+                std::cout << "  P3 latch 0x" << std::hex << std::setw(2)
+                          << static_cast<unsigned>(old_p3) << " -> 0x" << std::setw(2)
+                          << static_cast<unsigned>(machine->bus.pio_output_latch[3])
+                          << std::dec << '\n';
+            }
+            if (old_boot_enabled != machine->bus.boot_enabled) {
+                if (!changed) {
+                    std::cout << "BOOT STATE at step " << steps << ", cycle " << cpu.cycles()
+                              << ", PC 0x" << std::hex << std::setw(4) << std::setfill('0')
+                              << pc << " -> 0x" << std::setw(4) << cpu.pc() << std::dec << ":\n";
+                    changed = true;
+                }
+                std::cout << "  internal boot overlay "
+                          << (old_boot_enabled ? "enabled" : "disabled") << " -> "
+                          << (machine->bus.boot_enabled ? "enabled" : "disabled") << '\n';
+            }
+            if (old_cart_active != machine->bus.cart_active || old_slot != machine->bus.active_slot) {
+                if (!changed) {
+                    std::cout << "BOOT STATE at step " << steps << ", cycle " << cpu.cycles()
+                              << ", PC 0x" << std::hex << std::setw(4) << std::setfill('0')
+                              << pc << " -> 0x" << std::setw(4) << cpu.pc() << std::dec << ":\n";
+                    changed = true;
+                }
+                std::cout << "  cartridge select slot " << static_cast<unsigned>(old_slot)
+                          << " (" << (old_cart_active ? "active" : "inactive") << ") -> slot "
+                          << static_cast<unsigned>(machine->bus.active_slot) << " ("
+                          << (machine->bus.cart_active ? "active" : "inactive") << ")\n";
+            }
+            if (changed) std::cout << std::setfill(' ');
+        }
+
+        if (machine->bus.watch_hit) {
+            std::ostringstream reason;
+            reason << "write watchpoint at 0x" << std::hex << std::setw(4)
+                   << std::setfill('0') << machine->bus.watch_address;
+            debug_stop_reason = reason.str();
+            std::cout << "WATCH WRITE at step " << steps << ", instruction "
+                      << instructions_before << ", PC=0x" << std::hex << std::setw(4)
+                      << std::setfill('0') << pc << ": [0x" << std::setw(4)
+                      << machine->bus.watch_address << "] 0x" << std::setw(2)
+                      << static_cast<unsigned>(machine->bus.watch_old_value) << " -> 0x"
+                      << std::setw(2) << static_cast<unsigned>(machine->bus.watch_new_value)
+                      << std::dec << std::setfill(' ') << '\n';
+            debugger_stop = true;
+        }
+        if (cpu.instructions() == instructions_before) { /* HALT idle cycle */
+            if (debugger_stop) break;
+            continue;
+        }
+        TraceEntry entry{};
+        entry.instruction = cpu.instructions() - 1;
+        entry.pc = pc;
+        entry.opcode = opcode;
+        entry.next_pc = cpu.pc();
+        entry.cycles = cpu.cycles() - before;
+        entry.disassembly = captured_disassembly;
         tail[tail_pos++ % tail.size()] = entry;
         if (cpu.instructions() <= trace_count) {
             std::cout << "  " << std::dec << std::setw(5) << entry.instruction
@@ -321,6 +550,7 @@ int main(int argc, char **argv)
                       << "  +" << std::dec << entry.cycles << " cyc\n"
                       << std::setfill(' ');
         }
+        if (debugger_stop) break;
     }
     for (TouchEvent& event : touch_events) {
         if (event.active) {
@@ -331,15 +561,26 @@ int main(int argc, char **argv)
     for (ButtonEvent& event : button_events) {
         if (event.active) gc_input_set_button(machine.get(), event.button, false);
     }
-    if (cpu.halted()) {
-        std::cout << "Recent instructions before HALT:\n";
+    if (debugger_stop) {
+        char disassembly[128] = {};
+        (void)gc_disassemble(machine.get(), cpu.pc(), disassembly, sizeof(disassembly));
+        std::cout << "Debugger stopped: " << debug_stop_reason << "\n"
+                  << "Next PC 0x" << std::hex << std::setw(4) << std::setfill('0')
+                  << cpu.pc() << "  " << disassembly << std::dec << std::setfill(' ') << '\n';
+    }
+    if (cpu.halted() || debugger_stop) {
+        std::cout << (debugger_stop ? "Recent instructions before debugger stop:\n"
+                                   : "Recent instructions before HALT:\n");
         const std::size_t stored = static_cast<std::size_t>(cpu.instructions() < tail.size()
                                   ? cpu.instructions() : tail.size());
         const std::size_t begin = tail_pos >= stored ? tail_pos - stored : 0;
         for (std::size_t i = 0; i < stored; ++i) {
             const auto& entry = tail[(begin + i) % tail.size()];
             char disassembly[128] = {};
-            (void)gc_disassemble(machine.get(), entry.pc, disassembly, sizeof(disassembly));
+            if (entry.disassembly[0] != '\0')
+                std::snprintf(disassembly, sizeof(disassembly), "%s", entry.disassembly.data());
+            else
+                (void)gc_disassemble(machine.get(), entry.pc, disassembly, sizeof(disassembly));
             std::cout << "  " << std::dec << std::setw(8) << entry.instruction
                       << "  PC=" << std::hex << std::setw(4) << std::setfill('0') << entry.pc
                       << " op=" << std::setw(2) << static_cast<unsigned>(entry.opcode)
@@ -371,8 +612,11 @@ int main(int argc, char **argv)
               << ' ' << std::setw(2) << static_cast<unsigned>(machine->bus.reg_file[0x15])
               << ' ' << std::setw(2) << static_cast<unsigned>(machine->bus.reg_file[0x16])
               << ' ' << std::setw(2) << static_cast<unsigned>(machine->bus.reg_file[0x17])
+              << "  P3-latch=0x" << std::setw(2)
+              << static_cast<unsigned>(machine->bus.pio_output_latch[3])
+              << "  slot=" << std::dec << static_cast<unsigned>(machine->bus.active_slot)
               << "  cart-active=" << (machine->bus.cart_active ? "yes" : "no") << '\n'
-              << "MMU0-4: ";
+              << "MMU0-4: " << std::hex;
     for (unsigned i = 0; i < 5; ++i)
         std::cout << "0x" << std::setw(2)
                   << static_cast<unsigned>(machine->bus.reg_file[0x24 + i])
@@ -383,6 +627,24 @@ int main(int argc, char **argv)
               << "  DMA transfers: " << cpu.dma_transfers()
               << "  VBlank ticks: " << cpu.vblank_ticks()
               << "  clock ticks: " << cpu.clock_ticks() << '\n';
+    if (debugger_stop)
+        std::cout << "Stopped by debugger: " << debug_stop_reason << '\n';
+    if (dump_set) {
+        std::cout << "Memory dump at 0x" << std::hex << std::setw(4)
+                  << std::setfill('0') << dump_address << std::dec << ":\n";
+        for (std::uint32_t offset = 0; offset < dump_length; offset += 16u) {
+            const std::uint32_t row_length = (dump_length - offset < 16u)
+                ? dump_length - offset : 16u;
+            std::cout << std::hex << std::setw(4) << std::setfill('0')
+                      << (static_cast<std::uint32_t>(dump_address) + offset) << ":";
+            for (std::uint32_t i = 0; i < row_length; ++i) {
+                const auto address = static_cast<std::uint16_t>(dump_address + offset + i);
+                std::cout << ' ' << std::setw(2)
+                          << static_cast<unsigned>(gc_bus_debug_read(machine.get(), address));
+            }
+            std::cout << std::dec << std::setfill(' ') << '\n';
+        }
+    }
 
     if (cpu.halted()) {
         std::cout << "CPU reached HALT.\n";
