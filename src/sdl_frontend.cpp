@@ -31,7 +31,6 @@ constexpr std::array<unsigned, 6> cpu_speed_presets = {
 
 /* Fast BIOS-assisted cartridge startup for the current Tiger BIOS layout. */
 constexpr std::uint64_t game_autoboot_trigger_instruction = 5000000u;
-constexpr std::uint64_t game_autoboot_touch_duration = 300000u;
 /* Keep turbo through the cartridge-launch transition, then return to the
    selected pace during the game's own startup. */
 constexpr std::uint64_t game_autoboot_transition_end_instruction = 8000000u;
@@ -443,8 +442,6 @@ int gc_sdl_session_run(GcMachine& machine, standalone::Sm8521Cpu& cpu,
     bool active_boot_has_cartridge = !start_in_launcher && !demo_mode &&
                                      !selection.cartridge_path.empty();
     bool game_autoboot_pending = active_boot_has_cartridge;
-    bool game_autoboot_touch_active = false;
-    std::uint64_t game_autoboot_touch_release_instruction = 0;
     bool game_autoboot_transition_fast_forward = false;
     std::uint64_t game_autoboot_transition_release_instruction = 0;
 
@@ -457,8 +454,6 @@ int gc_sdl_session_run(GcMachine& machine, standalone::Sm8521Cpu& cpu,
         tap_vblanks_strobed = 0;
         continuous_drag_active = false;
         continuous_drag_button = 0;
-        game_autoboot_touch_active = false;
-        game_autoboot_touch_release_instruction = 0;
         suppress_touch_until_release = false;
     };
 
@@ -498,8 +493,6 @@ int gc_sdl_session_run(GcMachine& machine, standalone::Sm8521Cpu& cpu,
         active_boot_has_cartridge = !bios_only && !demo_mode &&
                                     !boot_sel.cartridge_path.empty();
         game_autoboot_pending = active_boot_has_cartridge;
-        game_autoboot_touch_active = false;
-        game_autoboot_touch_release_instruction = 0;
         game_autoboot_transition_fast_forward = false;
         game_autoboot_transition_release_instruction = 0;
         lcd_texture_initialized = false;
@@ -666,8 +659,6 @@ int gc_sdl_session_run(GcMachine& machine, standalone::Sm8521Cpu& cpu,
                             sound.reset();
                             reset_input_state();
                             game_autoboot_pending = active_boot_has_cartridge;
-                            game_autoboot_touch_active = false;
-                            game_autoboot_touch_release_instruction = 0;
                             game_autoboot_transition_fast_forward = false;
                             game_autoboot_transition_release_instruction = 0;
                             lcd_texture_initialized = false;
@@ -1096,24 +1087,16 @@ int gc_sdl_session_run(GcMachine& machine, standalone::Sm8521Cpu& cpu,
         if (game_autoboot_pending && emulation_ready && !demo_mode && !paused &&
             cpu.instructions() >= game_autoboot_trigger_instruction) {
             game_autoboot_pending = false;
-            game_autoboot_touch_active = true;
-            game_autoboot_touch_release_instruction =
-                cpu.instructions() + game_autoboot_touch_duration;
+            tap_button_held = false;
+            tap_pulse_active = true;
+            tap_vblanks_total = 0;
+            tap_vblanks_strobed = 0;
             game_autoboot_transition_fast_forward = true;
             game_autoboot_transition_release_instruction =
                 game_autoboot_transition_end_instruction;
             (void)gc_input_set_touch(&machine, true, 2u, 3u);
             std::fprintf(stderr,
-                         "Auto-boot: BIOS Cartridge touch at instruction %llu.\n",
-                         static_cast<unsigned long long>(cpu.instructions()));
-        }
-        if (game_autoboot_touch_active &&
-            cpu.instructions() >= game_autoboot_touch_release_instruction) {
-            game_autoboot_touch_active = false;
-            game_autoboot_touch_release_instruction = 0;
-            (void)gc_input_set_touch(&machine, false, 0u, 0u);
-            std::fprintf(stderr,
-                         "Auto-boot: BIOS Cartridge touch released at instruction %llu.\n",
+                         "Auto-boot: BIOS Cartridge single-scan touch at instruction %llu.\n",
                          static_cast<unsigned long long>(cpu.instructions()));
         }
         if (game_autoboot_transition_fast_forward &&
@@ -1129,7 +1112,7 @@ int gc_sdl_session_run(GcMachine& machine, standalone::Sm8521Cpu& cpu,
         unsigned vblanks_due = 0;
         bool multi_vblank_blended = false;
         if (!paused) {
-            const bool autoboot_turbo = game_autoboot_pending || game_autoboot_touch_active ||
+            const bool autoboot_turbo = game_autoboot_pending ||
                                         game_autoboot_transition_fast_forward;
             const double pace_mult = (fast_forward || autoboot_turbo)
                 ? 4.0 : (static_cast<double>(selection.timing.game_pace_percent) / 100.0);
