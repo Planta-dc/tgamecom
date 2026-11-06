@@ -29,6 +29,13 @@ constexpr std::array<unsigned, 6> cpu_speed_presets = {
     75u, 100u, 120u, 150u, 200u, 300u
 };
 
+/* Fast BIOS-assisted cartridge startup for the current Tiger BIOS layout. */
+constexpr std::uint64_t game_autoboot_trigger_instruction = 5000000u;
+constexpr std::uint64_t game_autoboot_touch_duration = 300000u;
+/* Keep turbo through the cartridge-launch transition, then return to the
+   selected pace during the game's own startup. */
+constexpr std::uint64_t game_autoboot_transition_end_instruction = 8000000u;
+
 std::string join_path(const std::string& directory, const char *name)
 {
     std::string path = directory;
@@ -433,6 +440,13 @@ int gc_sdl_session_run(GcMachine& machine, standalone::Sm8521Cpu& cpu,
     unsigned tap_vblanks_strobed = 0;
     bool continuous_drag_active = false;
     Uint8 continuous_drag_button = 0;
+    bool active_boot_has_cartridge = !start_in_launcher && !demo_mode &&
+                                     !selection.cartridge_path.empty();
+    bool game_autoboot_pending = active_boot_has_cartridge;
+    bool game_autoboot_touch_active = false;
+    std::uint64_t game_autoboot_touch_release_instruction = 0;
+    bool game_autoboot_transition_fast_forward = false;
+    std::uint64_t game_autoboot_transition_release_instruction = 0;
 
     auto reset_input_state = [&]() {
         clear_machine_inputs(machine);
@@ -443,6 +457,8 @@ int gc_sdl_session_run(GcMachine& machine, standalone::Sm8521Cpu& cpu,
         tap_vblanks_strobed = 0;
         continuous_drag_active = false;
         continuous_drag_button = 0;
+        game_autoboot_touch_active = false;
+        game_autoboot_touch_release_instruction = 0;
         suppress_touch_until_release = false;
     };
 
@@ -479,6 +495,13 @@ int gc_sdl_session_run(GcMachine& machine, standalone::Sm8521Cpu& cpu,
         emulation_ready = true;
         in_launcher = false;
         paused = false;
+        active_boot_has_cartridge = !bios_only && !demo_mode &&
+                                    !boot_sel.cartridge_path.empty();
+        game_autoboot_pending = active_boot_has_cartridge;
+        game_autoboot_touch_active = false;
+        game_autoboot_touch_release_instruction = 0;
+        game_autoboot_transition_fast_forward = false;
+        game_autoboot_transition_release_instruction = 0;
         lcd_texture_initialized = false;
         title_dirty = true;
         if (!demo_mode) (void)gc_save_launch_selection(selection);
@@ -642,6 +665,11 @@ int gc_sdl_session_run(GcMachine& machine, standalone::Sm8521Cpu& cpu,
                             apply_serial_mode(false);
                             sound.reset();
                             reset_input_state();
+                            game_autoboot_pending = active_boot_has_cartridge;
+                            game_autoboot_touch_active = false;
+                            game_autoboot_touch_release_instruction = 0;
+                            game_autoboot_transition_fast_forward = false;
+                            game_autoboot_transition_release_instruction = 0;
                             lcd_texture_initialized = false;
                         }
                         menubar.show_toast("EMULATION RESET");
@@ -1062,11 +1090,48 @@ int gc_sdl_session_run(GcMachine& machine, standalone::Sm8521Cpu& cpu,
             continue;
         }
 
+        /* Accelerate BIOS startup, tap its Cartridge icon for the firmware to
+           sample the touch matrix, then keep turbo through the cartridge-launch
+           transition. This preserves the BIOS launch path instead of jumping PC. */
+        if (game_autoboot_pending && emulation_ready && !demo_mode && !paused &&
+            cpu.instructions() >= game_autoboot_trigger_instruction) {
+            game_autoboot_pending = false;
+            game_autoboot_touch_active = true;
+            game_autoboot_touch_release_instruction =
+                cpu.instructions() + game_autoboot_touch_duration;
+            game_autoboot_transition_fast_forward = true;
+            game_autoboot_transition_release_instruction =
+                game_autoboot_transition_end_instruction;
+            (void)gc_input_set_touch(&machine, true, 2u, 3u);
+            std::fprintf(stderr,
+                         "Auto-boot: BIOS Cartridge touch at instruction %llu.\n",
+                         static_cast<unsigned long long>(cpu.instructions()));
+        }
+        if (game_autoboot_touch_active &&
+            cpu.instructions() >= game_autoboot_touch_release_instruction) {
+            game_autoboot_touch_active = false;
+            game_autoboot_touch_release_instruction = 0;
+            (void)gc_input_set_touch(&machine, false, 0u, 0u);
+            std::fprintf(stderr,
+                         "Auto-boot: BIOS Cartridge touch released at instruction %llu.\n",
+                         static_cast<unsigned long long>(cpu.instructions()));
+        }
+        if (game_autoboot_transition_fast_forward &&
+            cpu.instructions() >= game_autoboot_transition_release_instruction) {
+            game_autoboot_transition_fast_forward = false;
+            game_autoboot_transition_release_instruction = 0;
+            std::fprintf(stderr,
+                         "Auto-boot: launch transition complete at instruction %llu.\n",
+                         static_cast<unsigned long long>(cpu.instructions()));
+        }
+
         /* Step active emulation when not paused. */
         unsigned vblanks_due = 0;
         bool multi_vblank_blended = false;
         if (!paused) {
-            const double pace_mult = fast_forward
+            const bool autoboot_turbo = game_autoboot_pending || game_autoboot_touch_active ||
+                                        game_autoboot_transition_fast_forward;
+            const double pace_mult = (fast_forward || autoboot_turbo)
                 ? 4.0 : (static_cast<double>(selection.timing.game_pace_percent) / 100.0);
             const double effective_cpu_hz = static_cast<double>(nominal_cpu_hz) * pace_mult;
             const double effective_lcd_hz = selection.timing.lcd_hz * pace_mult;
