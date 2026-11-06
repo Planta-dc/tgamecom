@@ -47,7 +47,7 @@ void print_usage(const char *program)
                  " [--modem] [--phonebook FILE] [--link-listen PORT] [--link-connect HOST:PORT]"
                  " [--lcd-hz HZ] [--vsync on|off] [--lock-hz] [--speed PERCENT] [--pace PERCENT]"
                  " [--palette natural|greenish|grayish|classic] [--touch-mode tap|debounce|hold] [--demo]\n"
-                 "With no options, opens the interactive launcher.\n"
+                 "With no options, opens the interactive launcher. Start game auto-selects the cartridge; Start BIOS remains available.\n"
                  "Firmware DIR must contain external.bin (or boot.rom); internal.bin is optional.\n"
                  "Timing, input, NVRAM & serial options (also adjustable live in the top menu bar):\n"
                  "  --lcd-hz HZ           Emulated LCD VBlank refresh rate, 10..240 (default: 75.48 HW)\n"
